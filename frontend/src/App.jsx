@@ -141,7 +141,30 @@ function App() {
   // ==========================================
   // LOAD DATA FROM BACKEND
   // ==========================================
+// ==========================================
+// INVESTIGATE TRANSACTION
+// ==========================================
 
+const handleInvestigation = async (transactionId) => {
+  try {
+    const response = await fetch(
+      `http://localhost:5000/investigate/${transactionId}`
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      alert(data.message);
+      return;
+    }
+
+    setInvestigation(data);
+
+  } catch (error) {
+    console.error("Investigation error:", error);
+    alert("Could not investigate transaction.");
+  }
+};
   useEffect(() => {
 
     // Summary
@@ -175,14 +198,7 @@ function App() {
       .catch((error) =>
         console.error("Approval actions error:", error)
       );
-      // AI Investigation
-fetch("http://localhost:5000/investigate/TXN1004")
-  .then((response) => response.json())
-  .then((data) => setInvestigation(data))
-  .catch((error) =>
-    console.error("Investigation error:", error)
-  );
-
+      
   }, []);
 
   // ==========================================
@@ -291,12 +307,13 @@ fetch("http://localhost:5000/investigate/TXN1004")
         <thead>
 
           <tr>
-            <th>Case ID</th>
-            <th>Transaction</th>
-            <th>Difference</th>
-            <th>Risk</th>
-            <th>Status</th>
-          </tr>
+  <th>Case ID</th>
+  <th>Transaction</th>
+  <th>Difference</th>
+  <th>Risk</th>
+  <th>Status</th>
+  <th>Action</th>
+</tr>
 
         </thead>
 
@@ -315,6 +332,15 @@ fetch("http://localhost:5000/investigate/TXN1004")
               <td>{item.risk_level}</td>
 
               <td>{item.case_status}</td>
+              <td>
+  <button
+    onClick={() =>
+      handleInvestigation(item.transaction_id)
+    }
+  >
+    🔍 Investigate
+  </button>
+</td>
 
             </tr>
 
