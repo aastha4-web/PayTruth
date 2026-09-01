@@ -978,697 +978,7 @@ app.patch("/cases/:id/resolve", async (req, res) => {
 // INVESTIGATION ENGINE — STEP 39
 // ==================================================
 
-app.get("/investigate/:transaction_id", async (req, res) => {
 
-    try {
-
-        const { transaction_id } =
-            req.params;
-
-
-        // ==================================================
-        // 1. GET TRANSACTION
-        // ==================================================
-
-        const transactionResult =
-            await pool.query(
-                `
-                SELECT
-
-                    id,
-                    transaction_id,
-                    merchant_id,
-                    transaction_amount,
-                    transaction_date,
-                    payment_status
-
-                FROM transactions
-
-                WHERE transaction_id = $1
-                `,
-                [transaction_id]
-            );
-
-
-        if (
-            transactionResult.rows.length === 0
-        ) {
-
-            return res.status(404).json({
-
-                message:
-                    "Transaction not found"
-
-            });
-        }
-
-
-        const transaction =
-            transactionResult.rows[0];
-
-
-        const transactionAmount =
-            Number(
-                transaction.transaction_amount
-            );
-
-
-        // ==================================================
-        // 2. GET SETTLEMENT
-        // ==================================================
-
-        const settlementResult =
-            await pool.query(
-                `
-                SELECT
-
-                    id,
-                    settlement_id,
-                    transaction_id,
-                    settlement_amount,
-                    settlement_date,
-                    settlement_status
-
-                FROM settlements
-
-                WHERE transaction_id = $1
-
-                ORDER BY settlement_date DESC
-
-                LIMIT 1
-                `,
-                [transaction_id]
-            );
-
-
-        if (
-            settlementResult.rows.length === 0
-        ) {
-
-            return res.status(404).json({
-
-                message:
-                    "Settlement record not found"
-
-            });
-        }
-
-
-        const settlement =
-            settlementResult.rows[0];
-
-
-        const settlementAmount =
-            Number(
-                settlement.settlement_amount
-            );
-
-
-        // ==================================================
-        // 3. CALCULATE MISMATCH
-        // ==================================================
-
-        const difference =
-            Number(
-                (
-                    transactionAmount -
-                    settlementAmount
-                ).toFixed(2)
-            );
-
-
-        // ==================================================
-        // 4. GET FINANCIAL ADJUSTMENTS
-        // ==================================================
-
-        const adjustmentResult =
-            await pool.query(
-                `
-                SELECT
-
-                    id,
-                    transaction_id,
-                    adjustment_type,
-                    amount,
-                    reason,
-                    created_at
-
-                FROM settlement_adjustments
-
-                WHERE transaction_id = $1
-
-                ORDER BY created_at DESC
-                `,
-                [transaction_id]
-            );
-
-
-        const adjustments =
-            adjustmentResult.rows;
-
-
-        // ==================================================
-        // 5. CALCULATE TOTAL ADJUSTMENTS
-        // ==================================================
-
-        const totalAdjustments =
-            Number(
-
-                adjustments
-                    .reduce(
-
-                        (total, item) =>
-                            total +
-                            Number(item.amount),
-
-                        0
-                    )
-
-                    .toFixed(2)
-
-            );
-
-
-        // ==================================================
-        // 6. PREPARE INVESTIGATION
-        // ==================================================
-
-        const investigation = {
-
-            transaction_id:
-                transaction.transaction_id,
-
-            merchant_id:
-                transaction.merchant_id,
-
-            investigation_status:
-                null,
-
-            transaction: {
-
-                amount:
-                    transactionAmount,
-
-                date:
-                    transaction.transaction_date,
-
-                payment_status:
-                    transaction.payment_status
-
-            },
-
-            settlement: {
-
-                settlement_id:
-                    settlement.settlement_id,
-
-                amount:
-                    settlementAmount,
-
-                date:
-                    settlement.settlement_date,
-
-                status:
-                    settlement.settlement_status
-
-            },
-
-            mismatch: {
-
-                detected:
-                    difference !== 0,
-
-                transaction_amount:
-                    transactionAmount,
-
-                settlement_amount:
-                    settlementAmount,
-
-                difference:
-                    difference
-
-            },
-
-            financial_evidence: [],
-
-            root_cause_type:
-                null,
-
-            root_cause:
-                null,
-
-            confidence:
-                0,
-
-            unexplained_difference:
-                difference,
-
-            recommended_action:
-                null,
-
-            human_approval_required:
-                true,
-
-            automatic_action:
-                false
-
-        };
-
-
-        // ==================================================
-        // 7. NO MISMATCH
-        // ==================================================
-
-        if (difference === 0) {
-
-            investigation.investigation_status =
-                "NO_MISMATCH";
-
-
-            investigation.root_cause_type =
-                "NO_DISCREPANCY";
-
-
-            investigation.root_cause =
-                "Transaction amount and settlement amount match.";
-
-
-            investigation.financial_evidence.push({
-
-                check:
-                    "Transaction vs settlement",
-
-                transaction_amount:
-                    transactionAmount,
-
-                settlement_amount:
-                    settlementAmount,
-
-                difference:
-                    0,
-
-                result:
-                    "MATCH"
-
-            });
-
-
-            investigation.unexplained_difference =
-                0;
-
-
-            investigation.confidence =
-                100;
-
-
-            investigation.recommended_action =
-                "No corrective action required.";
-
-        }
-
-
-        // ==================================================
-        // 8. MISMATCH EXISTS
-        // ==================================================
-
-        else {
-
-            investigation.investigation_status =
-                "MISMATCH_FOUND";
-
-
-            investigation.financial_evidence.push({
-
-                check:
-                    "Transaction amount",
-
-                value:
-                    transactionAmount,
-
-                result:
-                    "RECORDED"
-
-            });
-
-
-            investigation.financial_evidence.push({
-
-                check:
-                    "Settlement amount",
-
-                value:
-                    settlementAmount,
-
-                result:
-                    "RECORDED"
-
-            });
-
-
-            investigation.financial_evidence.push({
-
-                check:
-                    "Amount difference",
-
-                calculation:
-                    `${transactionAmount} - ${settlementAmount}`,
-
-                difference:
-                    difference,
-
-                result:
-                    "MISMATCH"
-
-            });
-
-
-            // ==================================================
-            // 9. CHECK FINANCIAL ADJUSTMENTS
-            // ==================================================
-
-            if (
-                adjustments.length > 0
-            ) {
-
-                adjustments.forEach(
-                    adjustment => {
-
-                        investigation.financial_evidence.push({
-
-                            check:
-                                "Financial adjustment",
-
-                            adjustment_type:
-                                adjustment.adjustment_type,
-
-                            amount:
-                                Number(
-                                    adjustment.amount
-                                ),
-
-                            reason:
-                                adjustment.reason,
-
-                            result:
-                                "FOUND"
-
-                        });
-
-                    }
-                );
-
-
-                // FULLY EXPLAINED
-
-                if (
-
-                    Number(
-                        totalAdjustments.toFixed(2)
-                    )
-
-                    ===
-
-                    Math.abs(difference)
-
-                ) {
-
-                    const types =
-                        [
-                            ...new Set(
-
-                                adjustments.map(
-                                    item =>
-                                        item.adjustment_type
-                                )
-
-                            )
-                        ];
-
-
-                    investigation.root_cause_type =
-                        "FINANCIAL_ADJUSTMENT";
-
-
-                    investigation.root_cause =
-                        `The ₹${Math.abs(difference)} settlement difference is fully explained by recorded financial adjustment(s): ${types.join(", ")}.`;
-
-
-                    investigation.unexplained_difference =
-                        0;
-
-
-                    investigation.confidence =
-                        98;
-
-
-                    investigation.financial_evidence.push({
-
-                        check:
-                            "Adjustment reconciliation",
-
-                        total_adjustments:
-                            totalAdjustments,
-
-                        mismatch_amount:
-                            Math.abs(difference),
-
-                        result:
-                            "FULLY_EXPLAINED"
-
-                    });
-
-
-                    investigation.recommended_action =
-                        "Review the identified financial adjustment and proceed with correction only after human approval.";
-
-                }
-
-
-                // PARTIALLY EXPLAINED
-
-                else if (
-
-                    totalAdjustments <
-                    Math.abs(difference)
-
-                ) {
-
-                    const remainingDifference =
-                        Number(
-
-                            (
-
-                                Math.abs(difference) -
-                                totalAdjustments
-
-                            ).toFixed(2)
-
-                        );
-
-
-                    investigation.root_cause_type =
-                        "PARTIALLY_EXPLAINED";
-
-
-                    investigation.root_cause =
-                        `Recorded financial adjustments explain ₹${totalAdjustments} of the ₹${Math.abs(difference)} mismatch. ₹${remainingDifference} remains unexplained.`;
-
-
-                    investigation.unexplained_difference =
-                        remainingDifference;
-
-
-                    investigation.confidence =
-                        90;
-
-
-                    investigation.financial_evidence.push({
-
-                        check:
-                            "Partial reconciliation",
-
-                        total_adjustments:
-                            totalAdjustments,
-
-                        mismatch_amount:
-                            Math.abs(difference),
-
-                        unexplained:
-                            remainingDifference,
-
-                        result:
-                            "PARTIALLY_EXPLAINED"
-
-                    });
-
-
-                    investigation.recommended_action =
-                        "Investigate the remaining unexplained amount before making any financial correction.";
-
-                }
-
-
-                // ADJUSTMENT GREATER THAN MISMATCH
-
-                else {
-
-                    const excess =
-                        Number(
-
-                            (
-
-                                totalAdjustments -
-                                Math.abs(difference)
-
-                            ).toFixed(2)
-
-                        );
-
-
-                    investigation.root_cause_type =
-                        "ADJUSTMENT_REQUIRES_REVIEW";
-
-
-                    investigation.root_cause =
-                        `Financial adjustments total ₹${totalAdjustments}, which is greater than the ₹${Math.abs(difference)} mismatch. The records require human review.`;
-
-
-                    investigation.unexplained_difference =
-                        difference;
-
-
-                    investigation.confidence =
-                        85;
-
-
-                    investigation.financial_evidence.push({
-
-                        check:
-                            "Adjustment consistency",
-
-                        total_adjustments:
-                            totalAdjustments,
-
-                        mismatch_amount:
-                            Math.abs(difference),
-
-                        excess:
-                            excess,
-
-                        result:
-                            "REQUIRES_REVIEW"
-
-                    });
-
-
-                    investigation.recommended_action =
-                        "Do not automatically correct the settlement. Human review is required.";
-
-                }
-
-            }
-
-
-            // ==================================================
-            // 10. NO FINANCIAL EVIDENCE
-            // ==================================================
-
-            else {
-
-                investigation.root_cause_type =
-                    "UNEXPLAINED_SETTLEMENT_DIFFERENCE";
-
-
-                investigation.root_cause =
-                    `A ₹${Math.abs(difference)} difference exists between the transaction and settlement records, but no financial adjustment record explains the difference.`;
-
-
-                investigation.unexplained_difference =
-                    Math.abs(difference);
-
-
-                investigation.confidence =
-                    70;
-
-
-                investigation.financial_evidence.push({
-
-                    check:
-                        "Financial adjustments",
-
-                    result:
-                        "NOT_FOUND",
-
-                    explanation:
-                        "No fee, refund, tax, adjustment, chargeback, or other financial adjustment record was found."
-
-                });
-
-
-                investigation.recommended_action =
-                    "Raise a settlement investigation and request human review.";
-
-            }
-
-        }
-
-
-        // ==================================================
-        // 11. SAFETY RULE
-        // ==================================================
-
-        if (
-
-            investigation.confidence < 95
-
-            ||
-
-            investigation.unexplained_difference !== 0
-
-        ) {
-
-            investigation.human_approval_required =
-                true;
-
-
-            investigation.automatic_action =
-                false;
-
-
-            investigation.recommended_action +=
-                " Automatic financial execution is blocked until human approval and verification.";
-
-        }
-
-
-        // ==================================================
-        // 12. FINAL RESPONSE
-        // ==================================================
-
-        res.json(
-            investigation
-        );
-
-
-    } catch (error) {
-
-        console.error(
-            "Investigation error:",
-            error
-        );
-
-
-        res.status(500).json({
-
-            message:
-                "Investigation failed",
-
-            error:
-                error.message
-
-        });
-    }
-});
 // ==========================================
 // CASE HISTORY
 // ==========================================
@@ -1945,7 +1255,10 @@ app.get("/investigate/:transaction_id", async (req, res) => {
     try {
         const { transaction_id } = req.params;
 
-        // 1. Get transaction
+        // ==========================================
+        // 1. GET TRANSACTION
+        // ==========================================
+
         const transactionResult = await pool.query(`
             SELECT
                 transaction_id,
@@ -1965,7 +1278,14 @@ app.get("/investigate/:transaction_id", async (req, res) => {
 
         const transaction = transactionResult.rows[0];
 
-        // 2. Get settlement
+        const transactionAmount =
+            Number(transaction.transaction_amount);
+
+
+        // ==========================================
+        // 2. GET SETTLEMENT
+        // ==========================================
+
         const settlementResult = await pool.query(`
             SELECT
                 settlement_id,
@@ -1983,27 +1303,45 @@ app.get("/investigate/:transaction_id", async (req, res) => {
             return res.json({
                 transaction_id,
                 investigation_status: "INCOMPLETE",
-                reason: "No settlement record found",
-                evidence: {
-                    transaction_amount:
-                        Number(transaction.transaction_amount)
-                }
+
+                root_cause_type:
+                    "MISSING_SETTLEMENT",
+
+                root_cause:
+                    "No settlement record was found for this transaction.",
+
+                confidence: 100,
+
+                recommended_action:
+                    "Investigate the missing settlement record.",
+
+                human_approval_required: true,
+
+                automatic_action: false
             });
         }
 
         const settlement = settlementResult.rows[0];
 
-        // 3. Calculate the financial difference
-        const transactionAmount =
-            Number(transaction.transaction_amount);
-
         const settlementAmount =
             Number(settlement.settlement_amount);
 
-        const difference =
-            Math.abs(transactionAmount - settlementAmount);
 
-        // 4. Get all adjustments
+        // ==========================================
+        // 3. CALCULATE DIFFERENCE
+        // ==========================================
+
+        const difference =
+            Math.abs(
+                transactionAmount -
+                settlementAmount
+            );
+
+
+        // ==========================================
+        // 4. GET FINANCIAL ADJUSTMENTS
+        // ==========================================
+
         const adjustmentResult = await pool.query(`
             SELECT
                 id,
@@ -2017,15 +1355,24 @@ app.get("/investigate/:transaction_id", async (req, res) => {
             ORDER BY created_at
         `, [transaction_id]);
 
-        const adjustments = adjustmentResult.rows.map(row => ({
-            id: row.id,
-            adjustment_type: row.adjustment_type,
-            amount: Number(row.amount),
-            reason: row.reason,
-            created_at: row.created_at
-        }));
+        const adjustments =
+            adjustmentResult.rows.map(row => ({
+                id: row.id,
+                adjustment_type:
+                    row.adjustment_type,
+                amount:
+                    Number(row.amount),
+                reason:
+                    row.reason,
+                created_at:
+                    row.created_at
+            }));
 
-        // 5. Calculate total adjustments
+
+        // ==========================================
+        // 5. TOTAL ADJUSTMENTS
+        // ==========================================
+
         const totalAdjustments =
             adjustments.reduce(
                 (sum, adjustment) =>
@@ -2033,14 +1380,15 @@ app.get("/investigate/:transaction_id", async (req, res) => {
                 0
             );
 
-        // 6. Calculate unexplained amount
-        const unexplainedDifference =
-            Math.abs(difference - totalAdjustments);
 
-        // 7. Check whether multiple adjustments conflict
+        // ==========================================
+        // 6. CONTRADICTION DETECTION
+        // ==========================================
+
         const adjustmentAmounts =
             adjustments.map(
-                adjustment => adjustment.amount
+                adjustment =>
+                    adjustment.amount
             );
 
         const uniqueAmounts =
@@ -2050,52 +1398,341 @@ app.get("/investigate/:transaction_id", async (req, res) => {
             uniqueAmounts.length > 1 &&
             adjustments.length > 1;
 
-        // 8. Determine investigation result
-        let investigationStatus;
 
-        if (contradictionDetected) {
-            investigationStatus =
-                "CONTRADICTION_DETECTED";
-        } else if (difference === 0) {
-            investigationStatus =
-                "NO_MISMATCH";
-        } else if (unexplainedDifference === 0) {
-            investigationStatus =
-                "FULLY_EXPLAINED";
-        } else {
-            investigationStatus =
-                "PARTIALLY_EXPLAINED";
+        // ==========================================
+        // 7. EXPLAINED / UNEXPLAINED AMOUNT
+        // ==========================================
+
+        let explainedDifference = 0;
+        let unexplainedDifference = difference;
+
+        if (!contradictionDetected) {
+
+            if (totalAdjustments <= difference) {
+
+                explainedDifference =
+                    totalAdjustments;
+
+                unexplainedDifference =
+                    difference -
+                    totalAdjustments;
+
+            } else {
+
+                explainedDifference =
+                    difference;
+
+                unexplainedDifference = 0;
+            }
         }
 
-        // 9. Return investigation evidence
+
+        // ==========================================
+        // 8. ROOT CAUSE ENGINE
+        // ==========================================
+
+        let rootCauseType;
+        let rootCause;
+        let confidence;
+        let recommendedAction;
+        let investigationStatus;
+
+
+        // ------------------------------------------
+        // CASE A: NO MISMATCH
+        // ------------------------------------------
+
+        if (difference === 0) {
+
+            investigationStatus =
+                "NO_MISMATCH";
+
+            rootCauseType =
+                "NO_DISCREPANCY";
+
+            rootCause =
+                "Transaction amount and settlement amount match.";
+
+            confidence = 100;
+
+            recommendedAction =
+                "No corrective action required.";
+
+        }
+
+
+        // ------------------------------------------
+        // CASE B: CONTRADICTION
+        // ------------------------------------------
+
+        else if (contradictionDetected) {
+
+            investigationStatus =
+                "CONTRADICTION_DETECTED";
+
+            rootCauseType =
+                "ADJUSTMENT_REQUIRES_REVIEW";
+
+            rootCause =
+                "Conflicting financial adjustment records were detected. A reliable root cause cannot be determined.";
+
+            confidence = 0;
+
+            recommendedAction =
+                "Do not automatically correct the settlement. Human investigation is required.";
+
+        }
+
+
+        // ------------------------------------------
+        // CASE C: FULLY EXPLAINED
+        // ------------------------------------------
+
+        else if (
+            unexplainedDifference === 0 &&
+            adjustments.length > 0
+        ) {
+
+            investigationStatus =
+                "FULLY_EXPLAINED";
+
+            const adjustmentTypes =
+                [
+                    ...new Set(
+                        adjustments.map(
+                            adjustment =>
+                                adjustment.adjustment_type
+                        )
+                    )
+                ];
+
+            rootCauseType =
+                "FINANCIAL_ADJUSTMENT";
+
+            rootCause =
+                `The ₹${difference} settlement difference is fully explained by recorded financial adjustment(s): ${adjustmentTypes.join(", ")}.`;
+
+            confidence = 98;
+
+            recommendedAction =
+                "Review the identified financial adjustment and proceed with correction only after human approval.";
+
+        }
+
+
+        // ------------------------------------------
+        // CASE D: PARTIALLY EXPLAINED
+        // ------------------------------------------
+
+        else if (
+            unexplainedDifference > 0 &&
+            adjustments.length > 0
+        ) {
+
+            investigationStatus =
+                "PARTIALLY_EXPLAINED";
+
+            rootCauseType =
+                "INSUFFICIENT_EVIDENCE";
+
+            rootCause =
+                `Recorded financial adjustments explain ₹${explainedDifference}, but ₹${unexplainedDifference} remains unexplained.`;
+
+            confidence = 50;
+
+            recommendedAction =
+                "Do not determine a final root cause. Additional evidence and human investigation are required.";
+
+        }
+
+
+        // ------------------------------------------
+        // CASE E: NO ADJUSTMENT
+        // ------------------------------------------
+
+        else {
+
+            investigationStatus =
+                "UNEXPLAINED_MISMATCH";
+
+            rootCauseType =
+                "UNKNOWN";
+
+            rootCause =
+                `A ₹${difference} settlement mismatch was detected, but no financial adjustment evidence was found to explain it.`;
+
+            confidence = 0;
+
+            recommendedAction =
+                "Investigate the transaction, settlement and related financial records before taking corrective action.";
+
+        }
+
+
+        // ==========================================
+        // 9. RETURN INVESTIGATION + ROOT CAUSE
+        // ==========================================
+
         res.json({
+
             transaction_id,
+
+            merchant_id:
+                transaction.merchant_id,
 
             investigation_status:
                 investigationStatus,
 
+
             transaction: {
-                amount: transactionAmount,
+
+                amount:
+                    transactionAmount,
+
+                date:
+                    transaction.transaction_date,
+
                 payment_status:
                     transaction.payment_status
+
             },
+
 
             settlement: {
-                amount: settlementAmount,
+
+                settlement_id:
+                    settlement.settlement_id,
+
+                amount:
+                    settlementAmount,
+
+                date:
+                    settlement.settlement_date,
+
                 status:
                     settlement.settlement_status
+
             },
 
-            difference,
 
-            adjustments,
+            mismatch: {
 
-            total_adjustments:
-                totalAdjustments,
+                detected:
+                    difference !== 0,
+
+                transaction_amount:
+                    transactionAmount,
+
+                settlement_amount:
+                    settlementAmount,
+
+                difference
+
+            },
+
+
+            financial_evidence: [
+
+                {
+
+                    check:
+                        "Transaction amount",
+
+                    value:
+                        transactionAmount,
+
+                    result:
+                        "RECORDED"
+
+                },
+
+                {
+
+                    check:
+                        "Settlement amount",
+
+                    value:
+                        settlementAmount,
+
+                    result:
+                        "RECORDED"
+
+                },
+
+                {
+
+                    check:
+                        "Amount difference",
+
+                    calculation:
+                        `${transactionAmount} - ${settlementAmount}`,
+
+                    difference,
+
+                    result:
+                        difference === 0
+                            ? "MATCH"
+                            : "MISMATCH"
+
+                },
+
+                ...adjustments.map(
+                    adjustment => ({
+
+                        check:
+                            "Financial adjustment",
+
+                        adjustment_type:
+                            adjustment.adjustment_type,
+
+                        amount:
+                            adjustment.amount,
+
+                        reason:
+                            adjustment.reason,
+
+                        result:
+                            "FOUND"
+
+                    })
+                ),
+
+                {
+
+                    check:
+                        "Adjustment reconciliation",
+
+                    total_adjustments:
+                        totalAdjustments,
+
+                    mismatch_amount:
+                        difference,
+
+                    unexplained_difference:
+                        unexplainedDifference,
+
+                    result:
+                        contradictionDetected
+                            ? "REQUIRES_REVIEW"
+                            : unexplainedDifference === 0
+                                ? "FULLY_EXPLAINED"
+                                : "PARTIALLY_EXPLAINED"
+
+                }
+
+            ],
+
+
+            root_cause_type:
+                rootCauseType,
+
+            root_cause:
+                rootCause,
+
+            confidence,
 
             explained_difference:
-                difference -
-                unexplainedDifference,
+                explainedDifference,
 
             unexplained_difference:
                 unexplainedDifference,
@@ -2103,22 +1740,15 @@ app.get("/investigate/:transaction_id", async (req, res) => {
             contradiction_detected:
                 contradictionDetected,
 
-            evidence_summary: {
-                transaction_amount:
-                    transactionAmount,
+            recommended_action:
+                recommendedAction,
 
-                settlement_amount:
-                    settlementAmount,
+            human_approval_required:
+                difference !== 0,
 
-                detected_difference:
-                    difference,
+            automatic_action:
+                false
 
-                adjustment_total:
-                    totalAdjustments,
-
-                unexplained_difference:
-                    unexplainedDifference
-            }
         });
 
     } catch (error) {
@@ -2129,9 +1759,12 @@ app.get("/investigate/:transaction_id", async (req, res) => {
         );
 
         res.status(500).json({
+
             message:
                 "Could not investigate transaction"
+
         });
+
     }
 });
 
