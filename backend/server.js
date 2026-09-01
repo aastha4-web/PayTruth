@@ -595,266 +595,123 @@ app.post("/approval-actions/create", async (req, res) => {
 // ==================================================
 
 app.post("/approval-actions/:id/execute", async (req, res) => {
-
     const client = await pool.connect();
 
     try {
-
         const { id } = req.params;
 
-
+        // Start a database transaction
         await client.query("BEGIN");
 
-
-        // 1. Get approval action
-
+        // 1. Get the approved action
         const actionResult = await client.query(
             `
-            SELECT *
-
+            SELECT
+                id,
+                case_id,
+                action_type,
+                approval_status,
+                execution_status
             FROM approval_actions
-
             WHERE id = $1
-
             FOR UPDATE
             `,
             [id]
         );
 
-
         if (actionResult.rows.length === 0) {
-
             await client.query("ROLLBACK");
 
             return res.status(404).json({
-
-                message:
-                    "Approval action not found."
-
+                message: "Approval action not found"
             });
         }
-
 
         const action = actionResult.rows[0];
 
-
-        // 2. Approval safety check
-
+        // 2. Safety check
         if (
-            action.approval_status !==
-            "APPROVED"
+            action.approval_status !== "APPROVED" ||
+            action.execution_status !== "NOT_EXECUTED"
         ) {
-
             await client.query("ROLLBACK");
 
             return res.status(400).json({
-
                 message:
-                    "Action must be approved before execution."
-
+                    "Action cannot be executed. It must be approved and not already executed."
             });
         }
 
-
-        // 3. Prevent duplicate execution
-
-        if (
-            action.execution_status !==
-            "NOT_EXECUTED"
-        ) {
-
-            await client.query("ROLLBACK");
-
-            return res.status(400).json({
-
-                message:
-                    "Action has already been executed or cannot be executed."
-
-            });
-        }
-
-
-        // 4. Get mismatch case
-
+        // 3. Find the related mismatch case
         const caseResult = await client.query(
             `
-            SELECT *
-
+            SELECT
+                id,
+                transaction_id,
+                case_status
             FROM mismatch_cases
-
             WHERE id = $1
-
             FOR UPDATE
             `,
             [action.case_id]
         );
 
-
         if (caseResult.rows.length === 0) {
-
             await client.query("ROLLBACK");
 
             return res.status(404).json({
-
-                message:
-                    "Related mismatch case not found."
-
+                message: "Related mismatch case not found"
             });
         }
 
+        const mismatchCase = caseResult.rows[0];
 
-        const mismatchCase =
-            caseResult.rows[0];
+        // 4. Move the case into investigation
+        const updatedCase = await client.query(
+            `
+            UPDATE mismatch_cases
+            SET case_status = 'INVESTIGATING'
+            WHERE id = $1
+            RETURNING *
+            `,
+            [mismatchCase.id]
+        );
 
+        // 5. Mark the approval action as executed
+        const updatedAction = await client.query(
+            `
+            UPDATE approval_actions
+            SET execution_status = 'EXECUTED'
+            WHERE id = $1
+            RETURNING *
+            `,
+            [id]
+        );
 
-        // 5. Never reopen resolved case
-
-        if (
-            mismatchCase.case_status ===
-            "RESOLVED"
-        ) {
-
-            await client.query("ROLLBACK");
-
-            return res.status(400).json({
-
-                message:
-                    "This case is already resolved. A resolved case cannot be executed again."
-
-            });
-        }
-
-
-        // 6. Perform actual controlled action
-
-        const caseUpdate =
-            await client.query(
-                `
-                UPDATE mismatch_cases
-
-                SET case_status =
-                    'INVESTIGATING'
-
-                WHERE id = $1
-
-                AND case_status IN
-                    ('OPEN', 'INVESTIGATING')
-
-                RETURNING *
-                `,
-                [action.case_id]
-            );
-
-
-        if (
-            caseUpdate.rows.length === 0
-        ) {
-
-            await client.query("ROLLBACK");
-
-            return res.status(400).json({
-
-                message:
-                    "Case cannot be moved to INVESTIGATING."
-
-            });
-        }
-
-
-        // 7. Mark execution only after
-        // business action succeeds
-
-        const executedResult =
-            await client.query(
-                `
-                UPDATE approval_actions
-
-                SET execution_status =
-                    'EXECUTED'
-
-                WHERE id = $1
-
-                AND approval_status =
-                    'APPROVED'
-
-                AND execution_status =
-                    'NOT_EXECUTED'
-
-                RETURNING *
-                `,
-                [id]
-            );
-
-
-        if (
-            executedResult.rows.length === 0
-        ) {
-
-            await client.query("ROLLBACK");
-
-            return res.status(500).json({
-
-                message:
-                    "Execution could not be recorded."
-
-            });
-        }
-
-
+        // 6. Commit both changes together
         await client.query("COMMIT");
 
-
         res.json({
-
-            message:
-                "Approved action executed successfully.",
-
-            action:
-                executedResult.rows[0],
-
-            executed_business_action: {
-
-                case_id:
-                    caseUpdate.rows[0].id,
-
-                transaction_id:
-                    caseUpdate.rows[0].transaction_id,
-
-                new_case_status:
-                    caseUpdate.rows[0].case_status
-
-            }
-
+            message: "Settlement investigation executed successfully",
+            action: updatedAction.rows[0],
+            case: updatedCase.rows[0]
         });
-
 
     } catch (error) {
 
         await client.query("ROLLBACK");
 
-        console.error(
-            "Execution error:",
-            error
-        );
-
+        console.error("Execution error:", error);
 
         res.status(500).json({
-
-            message:
-                "Could not execute action",
-
-            error:
-                error.message
-
+            message: "Could not execute action",
+            error: error.message
         });
 
     } finally {
-
         client.release();
-
     }
 });
-
 
 // ==================================================
 // INDEPENDENT VERIFICATION

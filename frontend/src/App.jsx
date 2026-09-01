@@ -5,6 +5,7 @@ function App() {
   const [reconciliation, setReconciliation] = useState([]);
   const [cases, setCases] = useState([]);
   const [approvalActions, setApprovalActions] = useState([]);
+  const [investigation, setInvestigation] = useState(null);
 
   // ==========================================
   // APPROVE / REJECT ACTION
@@ -174,6 +175,13 @@ function App() {
       .catch((error) =>
         console.error("Approval actions error:", error)
       );
+      // AI Investigation
+fetch("http://localhost:5000/investigate/TXN1004")
+  .then((response) => response.json())
+  .then((data) => setInvestigation(data))
+  .catch((error) =>
+    console.error("Investigation error:", error)
+  );
 
   }, []);
 
@@ -321,6 +329,124 @@ function App() {
       {/* ======================================
           AI RECOMMENDATIONS
       ====================================== */}
+      <hr />
+
+{/* ======================================
+    AI INVESTIGATION
+====================================== */}
+
+<h2>🧠 AI Investigation</h2>
+
+{investigation ? (
+
+  <div>
+
+    <h3>
+      Transaction: {investigation.transaction_id}
+    </h3>
+
+    <p>
+      <strong>Investigation Status:</strong>{" "}
+      {investigation.investigation_status}
+    </p>
+
+    <p>
+      <strong>Transaction Amount:</strong>{" "}
+      ₹{investigation.transaction.amount}
+    </p>
+
+    <p>
+      <strong>Settlement Amount:</strong>{" "}
+      ₹{investigation.settlement.amount}
+    </p>
+
+    <p>
+      <strong>Difference:</strong>{" "}
+      ₹{investigation.mismatch.difference}
+    </p>
+
+    <p>
+      <strong>Root Cause Type:</strong>{" "}
+      {investigation.root_cause_type}
+    </p>
+
+    <p>
+      <strong>Root Cause:</strong>{" "}
+      {investigation.root_cause}
+    </p>
+
+    <p>
+      <strong>Confidence:</strong>{" "}
+      {investigation.confidence}%
+    </p>
+
+    <p>
+      <strong>Unexplained Difference:</strong>{" "}
+      ₹{investigation.unexplained_difference}
+    </p>
+
+    <p>
+      <strong>Recommended Action:</strong>{" "}
+      {investigation.recommended_action}
+    </p>
+
+    <p>
+      <strong>Human Approval Required:</strong>{" "}
+      {investigation.human_approval_required
+        ? "YES"
+        : "NO"}
+    </p>
+
+    <h3>Financial Evidence</h3>
+
+    {investigation.financial_evidence.map(
+      (evidence, index) => (
+
+        <div key={index}>
+
+          <p>
+            <strong>
+              {evidence.check}
+            </strong>
+          </p>
+
+          {evidence.adjustment_type && (
+            <p>
+              Adjustment:{" "}
+              {evidence.adjustment_type}
+            </p>
+          )}
+
+          {evidence.amount !== undefined && (
+            <p>
+              Amount: ₹{evidence.amount}
+            </p>
+          )}
+
+          {evidence.difference !== undefined && (
+            <p>
+              Difference: ₹{evidence.difference}
+            </p>
+          )}
+
+          <p>
+            Result: {evidence.result}
+          </p>
+
+          <hr />
+
+        </div>
+
+      )
+    )}
+
+  </div>
+
+) : (
+
+  <p>Loading AI investigation...</p>
+
+)}
 
       <h2>🤖 AI Recommendations</h2>
 
