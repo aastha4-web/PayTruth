@@ -1941,6 +1941,199 @@ app.get("/risk-prioritization", async (req, res) => {
         });
     }
 });
+app.get("/investigate/:transaction_id", async (req, res) => {
+    try {
+        const { transaction_id } = req.params;
+
+        // 1. Get transaction
+        const transactionResult = await pool.query(`
+            SELECT
+                transaction_id,
+                merchant_id,
+                transaction_amount,
+                transaction_date,
+                payment_status
+            FROM transactions
+            WHERE transaction_id = $1
+        `, [transaction_id]);
+
+        if (transactionResult.rows.length === 0) {
+            return res.status(404).json({
+                message: "Transaction not found"
+            });
+        }
+
+        const transaction = transactionResult.rows[0];
+
+        // 2. Get settlement
+        const settlementResult = await pool.query(`
+            SELECT
+                settlement_id,
+                transaction_id,
+                settlement_amount,
+                settlement_date,
+                settlement_status
+            FROM settlements
+            WHERE transaction_id = $1
+            ORDER BY settlement_date DESC
+            LIMIT 1
+        `, [transaction_id]);
+
+        if (settlementResult.rows.length === 0) {
+            return res.json({
+                transaction_id,
+                investigation_status: "INCOMPLETE",
+                reason: "No settlement record found",
+                evidence: {
+                    transaction_amount:
+                        Number(transaction.transaction_amount)
+                }
+            });
+        }
+
+        const settlement = settlementResult.rows[0];
+
+        // 3. Calculate the financial difference
+        const transactionAmount =
+            Number(transaction.transaction_amount);
+
+        const settlementAmount =
+            Number(settlement.settlement_amount);
+
+        const difference =
+            Math.abs(transactionAmount - settlementAmount);
+
+        // 4. Get all adjustments
+        const adjustmentResult = await pool.query(`
+            SELECT
+                id,
+                transaction_id,
+                adjustment_type,
+                amount,
+                reason,
+                created_at
+            FROM settlement_adjustments
+            WHERE transaction_id = $1
+            ORDER BY created_at
+        `, [transaction_id]);
+
+        const adjustments = adjustmentResult.rows.map(row => ({
+            id: row.id,
+            adjustment_type: row.adjustment_type,
+            amount: Number(row.amount),
+            reason: row.reason,
+            created_at: row.created_at
+        }));
+
+        // 5. Calculate total adjustments
+        const totalAdjustments =
+            adjustments.reduce(
+                (sum, adjustment) =>
+                    sum + adjustment.amount,
+                0
+            );
+
+        // 6. Calculate unexplained amount
+        const unexplainedDifference =
+            Math.abs(difference - totalAdjustments);
+
+        // 7. Check whether multiple adjustments conflict
+        const adjustmentAmounts =
+            adjustments.map(
+                adjustment => adjustment.amount
+            );
+
+        const uniqueAmounts =
+            [...new Set(adjustmentAmounts)];
+
+        const contradictionDetected =
+            uniqueAmounts.length > 1 &&
+            adjustments.length > 1;
+
+        // 8. Determine investigation result
+        let investigationStatus;
+
+        if (contradictionDetected) {
+            investigationStatus =
+                "CONTRADICTION_DETECTED";
+        } else if (difference === 0) {
+            investigationStatus =
+                "NO_MISMATCH";
+        } else if (unexplainedDifference === 0) {
+            investigationStatus =
+                "FULLY_EXPLAINED";
+        } else {
+            investigationStatus =
+                "PARTIALLY_EXPLAINED";
+        }
+
+        // 9. Return investigation evidence
+        res.json({
+            transaction_id,
+
+            investigation_status:
+                investigationStatus,
+
+            transaction: {
+                amount: transactionAmount,
+                payment_status:
+                    transaction.payment_status
+            },
+
+            settlement: {
+                amount: settlementAmount,
+                status:
+                    settlement.settlement_status
+            },
+
+            difference,
+
+            adjustments,
+
+            total_adjustments:
+                totalAdjustments,
+
+            explained_difference:
+                difference -
+                unexplainedDifference,
+
+            unexplained_difference:
+                unexplainedDifference,
+
+            contradiction_detected:
+                contradictionDetected,
+
+            evidence_summary: {
+                transaction_amount:
+                    transactionAmount,
+
+                settlement_amount:
+                    settlementAmount,
+
+                detected_difference:
+                    difference,
+
+                adjustment_total:
+                    totalAdjustments,
+
+                unexplained_difference:
+                    unexplainedDifference
+            }
+        });
+
+    } catch (error) {
+
+        console.error(
+            "Investigation error:",
+            error
+        );
+
+        res.status(500).json({
+            message:
+                "Could not investigate transaction"
+        });
+    }
+});
 
 
 // ==================================================
