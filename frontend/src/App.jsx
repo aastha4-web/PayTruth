@@ -6,6 +6,8 @@ function App() {
   const [cases, setCases] = useState([]);
   const [approvalActions, setApprovalActions] = useState([]);
   const [investigation, setInvestigation] = useState(null);
+  const [caseHistory, setCaseHistory] = useState(null);
+  const [paymentHealth, setPaymentHealth] = useState(null);
 
   // ==========================================
   // APPROVE / REJECT ACTION
@@ -142,6 +144,30 @@ function App() {
   // LOAD DATA FROM BACKEND
   // ==========================================
 // ==========================================
+// ==========================================
+// LOAD CASE HISTORY
+// ==========================================
+
+const handleCaseHistory = async (caseId) => {
+  try {
+    const response = await fetch(
+      `http://localhost:5000/cases/${caseId}/history`
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      alert(data.message);
+      return;
+    }
+
+    setCaseHistory(data);
+
+  } catch (error) {
+    console.error("Case history error:", error);
+    alert("Could not load case history.");
+  }
+};
 // INVESTIGATE TRANSACTION
 // ==========================================
 
@@ -198,6 +224,13 @@ const handleInvestigation = async (transactionId) => {
       .catch((error) =>
         console.error("Approval actions error:", error)
       );
+      // Payment Health
+fetch("http://localhost:5000/payment-health")
+  .then((response) => response.json())
+  .then((data) => setPaymentHealth(data))
+  .catch((error) =>
+    console.error("Payment health error:", error)
+  );
       
   }, []);
 
@@ -240,6 +273,44 @@ const handleInvestigation = async (transactionId) => {
       )}
 
       <hr />
+      <hr />
+
+<h2>❤️ Payment Health</h2>
+
+{paymentHealth ? (
+  <div>
+
+    <h3>Total Transactions</h3>
+    <p>{paymentHealth.total_transactions}</p>
+
+    <h3>Successful Payments</h3>
+    <p>{paymentHealth.successful_payments}</p>
+
+    <h3>Failed Payments</h3>
+    <p>{paymentHealth.failed_payments}</p>
+
+    <h3>Total Transaction Value</h3>
+    <p>₹{paymentHealth.total_transaction_value}</p>
+
+    <h3>Total Settlement Value</h3>
+    <p>₹{paymentHealth.total_settlement_value}</p>
+
+    <h3>Mismatches</h3>
+    <p>{paymentHealth.mismatches}</p>
+
+    <h3>Money at Risk</h3>
+    <p>₹{paymentHealth.money_at_risk}</p>
+
+    <h3>Resolved Cases</h3>
+    <p>{paymentHealth.resolved_cases}</p>
+
+    <h3>Total Cases</h3>
+    <p>{paymentHealth.total_cases}</p>
+
+  </div>
+) : (
+  <p>Loading payment health...</p>
+)}
 
       {/* ======================================
           RECONCILIATION
@@ -340,6 +411,15 @@ const handleInvestigation = async (transactionId) => {
   >
     🔍 Investigate
   </button>
+  {" "}
+
+<button
+  onClick={() =>
+    handleCaseHistory(item.id)
+  }
+>
+  📜 History
+</button>
 </td>
 
             </tr>
@@ -471,6 +551,86 @@ const handleInvestigation = async (transactionId) => {
 ) : (
 
   <p>Loading AI investigation...</p>
+
+)}
+<hr />
+
+{/* ======================================
+    CASE HISTORY
+====================================== */}
+
+<h2>📜 Case History</h2>
+
+{caseHistory ? (
+
+  <div>
+
+    <h3>
+      Case #{caseHistory.case.id}
+    </h3>
+
+    <p>
+      <strong>Transaction:</strong>{" "}
+      {caseHistory.case.transaction_id}
+    </p>
+
+    <p>
+      <strong>Difference:</strong>{" "}
+      ₹{caseHistory.case.difference}
+    </p>
+
+    <p>
+      <strong>Risk Level:</strong>{" "}
+      {caseHistory.case.risk_level}
+    </p>
+
+    <p>
+      <strong>Current Status:</strong>{" "}
+      {caseHistory.case.case_status}
+    </p>
+
+    <h3>Action History</h3>
+
+    {caseHistory.actions.map((action) => (
+
+      <div key={action.id}>
+
+        <p>
+          <strong>Action:</strong>{" "}
+          {action.action_type}
+        </p>
+
+        <p>
+          <strong>Approval:</strong>{" "}
+          {action.approval_status}
+        </p>
+
+        <p>
+          <strong>Execution:</strong>{" "}
+          {action.execution_status}
+        </p>
+
+        <p>
+          <strong>Verification:</strong>{" "}
+          {action.verification_status}
+        </p>
+
+        <p>
+          <strong>Approved By:</strong>{" "}
+          {action.approved_by || "Not available"}
+        </p>
+
+        <hr />
+
+      </div>
+
+    ))}
+
+  </div>
+
+) : (
+
+  <p>Select a case and click 📜 History.</p>
 
 )}
 

@@ -1669,6 +1669,203 @@ app.get("/investigate/:transaction_id", async (req, res) => {
         });
     }
 });
+// ==========================================
+// CASE HISTORY
+// ==========================================
+
+app.get("/cases/:id/history", async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const result = await pool.query(
+            `
+            SELECT
+                mc.id AS case_id,
+                mc.transaction_id,
+                mc.difference,
+                mc.risk_level,
+                mc.case_status,
+                mc.created_at AS case_created_at,
+
+                aa.id AS action_id,
+                aa.action_type,
+                aa.ai_reason,
+                aa.proposed_action,
+                aa.approval_status,
+                aa.approved_by,
+                aa.approved_at,
+                aa.execution_status,
+                aa.verification_status,
+                aa.created_at AS action_created_at
+
+            FROM mismatch_cases mc
+
+            LEFT JOIN approval_actions aa
+                ON mc.id = aa.case_id
+
+            WHERE mc.id = $1
+
+            ORDER BY aa.created_at ASC
+            `,
+            [id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                message: "Case not found"
+            });
+        }
+
+        res.json({
+            case: {
+                id: result.rows[0].case_id,
+                transaction_id: result.rows[0].transaction_id,
+                difference: result.rows[0].difference,
+                risk_level: result.rows[0].risk_level,
+                case_status: result.rows[0].case_status,
+                created_at: result.rows[0].case_created_at
+            },
+
+            actions: result.rows
+                .filter(row => row.action_id !== null)
+                .map(row => ({
+                    id: row.action_id,
+                    action_type: row.action_type,
+                    ai_reason: row.ai_reason,
+                    proposed_action: row.proposed_action,
+                    approval_status: row.approval_status,
+                    approved_by: row.approved_by,
+                    approved_at: row.approved_at,
+                    execution_status: row.execution_status,
+                    verification_status: row.verification_status,
+                    created_at: row.action_created_at
+                }))
+        });
+
+    } catch (error) {
+
+        console.error("Case history error:", error);
+
+        res.status(500).json({
+            message: "Could not fetch case history"
+        });
+    }
+});
+app.get("/payment-health", async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT
+                COUNT(*) AS total_transactions,
+
+                COUNT(*) FILTER (
+                    WHERE payment_status = 'SUCCESS'
+                ) AS successful_payments,
+
+                COUNT(*) FILTER (
+                    WHERE payment_status != 'SUCCESS'
+                ) AS failed_payments,
+
+                COALESCE(
+                    SUM(transaction_amount),
+                    0
+                ) AS total_transaction_value
+
+            FROM transactions
+        `);
+
+        const settlementResult = await pool.query(`
+            SELECT
+                COALESCE(SUM(settlement_amount), 0)
+                AS total_settlement_value
+            FROM settlements
+        `);
+
+        const mismatchResult = await pool.query(`
+    SELECT
+        COUNT(*) AS mismatches,
+
+        COUNT(*) FILTER (
+            WHERE case_status != 'RESOLVED'
+        ) AS unresolved_mismatches,
+
+        COUNT(*) FILTER (
+            WHERE case_status = 'RESOLVED'
+        ) AS resolved_mismatches,
+
+        COALESCE(
+            SUM(difference) FILTER (
+                WHERE case_status != 'RESOLVED'
+            ),
+            0
+        ) AS money_at_risk
+
+    FROM mismatch_cases
+`);
+const resolutionResult = await pool.query(`
+    SELECT
+        COUNT(*) FILTER (
+            WHERE case_status = 'RESOLVED'
+        ) AS resolved_cases,
+
+        COUNT(*) AS total_cases
+
+    FROM mismatch_cases
+`);
+
+        const health = {
+            total_transactions:
+                Number(result.rows[0].total_transactions),
+
+            successful_payments:
+                Number(result.rows[0].successful_payments),
+
+            failed_payments:
+                Number(result.rows[0].failed_payments),
+
+            total_transaction_value:
+                Number(result.rows[0].total_transaction_value),
+
+            total_settlement_value:
+                Number(
+                    settlementResult.rows[0]
+                        .total_settlement_value
+                ),
+
+            mismatches:
+                Number(
+                    mismatchResult.rows[0].mismatches
+                ),
+
+            money_at_risk:
+                Number(
+                    mismatchResult.rows[0].money_at_risk
+                ),
+
+            resolved_cases:
+                Number(
+                    resolutionResult.rows[0].resolved_cases
+                ),
+
+            total_cases:
+                Number(
+                    resolutionResult.rows[0].total_cases
+                )
+        };
+
+        res.json(health);
+
+    } catch (error) {
+
+        console.error(
+            "Payment health error:",
+            error
+        );
+
+        res.status(500).json({
+            message: "Could not calculate payment health"
+        });
+    }
+});
 
 
 // ==================================================
