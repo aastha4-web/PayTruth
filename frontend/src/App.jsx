@@ -8,6 +8,7 @@ function App() {
   const [investigation, setInvestigation] = useState(null);
   const [caseHistory, setCaseHistory] = useState(null);
   const [paymentHealth, setPaymentHealth] = useState(null);
+  const [riskPrioritization, setRiskPrioritization] = useState([]);
 
   // ==========================================
   // APPROVE / REJECT ACTION
@@ -231,6 +232,13 @@ fetch("http://localhost:5000/payment-health")
   .catch((error) =>
     console.error("Payment health error:", error)
   );
+  // AI Risk Prioritization
+fetch("http://localhost:5000/risk-prioritization")
+  .then((response) => response.json())
+  .then((data) => setRiskPrioritization(data))
+  .catch((error) =>
+    console.error("Risk prioritization error:", error)
+  );
       
   }, []);
 
@@ -436,6 +444,69 @@ fetch("http://localhost:5000/payment-health")
           AI RECOMMENDATIONS
       ====================================== */}
       <hr />
+      <hr />
+
+{/* ======================================
+    AI RISK PRIORITIZATION
+====================================== */}
+
+<h2>🎯 AI Risk Prioritization</h2>
+
+{riskPrioritization.length === 0 ? (
+
+  <p>No mismatch cases available for prioritization.</p>
+
+) : (
+
+  <table border="1" cellPadding="10">
+
+    <thead>
+
+      <tr>
+        <th>Case ID</th>
+        <th>Transaction</th>
+        <th>Difference</th>
+        <th>Risk Level</th>
+        <th>Case Status</th>
+        <th>AI Priority</th>
+        <th>Priority Score</th>
+      </tr>
+
+    </thead>
+
+    <tbody>
+
+      {riskPrioritization.map((item) => (
+
+        <tr key={item.id}>
+
+          <td>{item.id}</td>
+
+          <td>{item.transaction_id}</td>
+
+          <td>₹{item.difference}</td>
+
+          <td>{item.risk_level}</td>
+
+          <td>{item.case_status}</td>
+
+          <td>
+            {item.priority}
+          </td>
+
+          <td>
+            {item.priority_score}
+          </td>
+
+        </tr>
+
+      ))}
+
+    </tbody>
+
+  </table>
+
+)}
 
 {/* ======================================
     AI INVESTIGATION

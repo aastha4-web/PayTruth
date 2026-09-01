@@ -1866,6 +1866,81 @@ const resolutionResult = await pool.query(`
         });
     }
 });
+// ==========================================
+// AI RISK PRIORITIZATION ENGINE
+// ==========================================
+
+app.get("/risk-prioritization", async (req, res) => {
+    try {
+
+        const result = await pool.query(`
+            SELECT
+                id,
+                transaction_id,
+                difference,
+                risk_level,
+                case_status,
+                created_at,
+
+                CASE
+                    WHEN case_status = 'RESOLVED'
+                        THEN 'COMPLETED'
+
+                    WHEN risk_level = 'HIGH'
+                         AND difference >= 1000
+                        THEN 'CRITICAL'
+
+                    WHEN risk_level = 'HIGH'
+                        THEN 'HIGH'
+
+                    WHEN risk_level = 'MEDIUM'
+                        THEN 'MEDIUM'
+
+                    WHEN risk_level = 'LOW'
+                        THEN 'LOW'
+
+                    ELSE 'REVIEW'
+                END AS priority,
+
+                CASE
+                    WHEN case_status = 'RESOLVED'
+                        THEN 0
+
+                    WHEN risk_level = 'HIGH'
+                         AND difference >= 1000
+                        THEN 100
+
+                    WHEN risk_level = 'HIGH'
+                        THEN 80
+
+                    WHEN risk_level = 'MEDIUM'
+                        THEN 50
+
+                    WHEN risk_level = 'LOW'
+                        THEN 25
+
+                    ELSE 10
+                END AS priority_score
+
+            FROM mismatch_cases
+
+            ORDER BY priority_score DESC, difference DESC
+        `);
+
+        res.json(result.rows);
+
+    } catch (error) {
+
+        console.error(
+            "Risk prioritization error:",
+            error
+        );
+
+        res.status(500).json({
+            message: "Could not calculate risk prioritization"
+        });
+    }
+});
 
 
 // ==================================================
