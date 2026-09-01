@@ -1,11 +1,10 @@
 const express = require("express");
 const { Pool } = require("pg");
-const cors=require("cors");
+const cors = require("cors");
 
-const app=express();
+const app = express();
 
 app.use(cors());
-
 app.use(express.json());
 
 const pool = new Pool({
@@ -16,26 +15,48 @@ const pool = new Pool({
     port: 5432,
 });
 
+
+// ==================================================
+// HOME
+// ==================================================
+
 app.get("/", (req, res) => {
     res.send("PayTruth AI Backend is Running 🚀");
 });
 
+
+// ==================================================
+// TEST DATABASE
+// ==================================================
+
 app.get("/test-db", async (req, res) => {
     try {
         const result = await pool.query("SELECT NOW()");
+
         res.json({
             message: "PayTruth database connected successfully!",
             time: result.rows[0].now
         });
+
     } catch (error) {
+
         console.error(error);
+
         res.status(500).json({
             message: "Database connection failed"
         });
     }
 });
+
+
+// ==================================================
+// RECONCILIATION
+// ==================================================
+
 app.get("/reconciliation", async (req, res) => {
+
     try {
+
         const result = await pool.query(`
             SELECT
                 t.transaction_id,
@@ -48,6 +69,7 @@ app.get("/reconciliation", async (req, res) => {
                 ) AS difference,
 
                 CASE
+
                     WHEN t.transaction_amount = s.settlement_amount
                         THEN 'MATCHED'
 
@@ -62,38 +84,57 @@ app.get("/reconciliation", async (req, res) => {
                         THEN 'MEDIUM'
 
                     ELSE 'HIGH'
+
                 END AS risk_level
 
             FROM transactions t
+
             JOIN settlements s
             ON t.transaction_id = s.transaction_id
 
             ORDER BY difference DESC;
         `);
 
+
         for (const item of result.rows) {
 
             if (item.risk_level !== "MATCHED") {
 
-                await pool.query(`
+                await pool.query(
+                    `
                     INSERT INTO mismatch_cases
-                    (transaction_id, difference, risk_level)
-                    VALUES ($1, $2, $3)
+                    (
+                        transaction_id,
+                        difference,
+                        risk_level
+                    )
+
+                    VALUES
+                    ($1, $2, $3)
+
                     ON CONFLICT (transaction_id)
+
                     DO UPDATE SET
+
                         difference = EXCLUDED.difference,
+
                         risk_level = EXCLUDED.risk_level
-                `, [
-                    item.transaction_id,
-                    item.difference,
-                    item.risk_level
-                ]);
+                    `,
+                    [
+                        item.transaction_id,
+                        item.difference,
+                        item.risk_level
+                    ]
+                );
             }
         }
 
+
         res.json(result.rows);
 
+
     } catch (error) {
+
         console.error(error);
 
         res.status(500).json({
@@ -101,11 +142,21 @@ app.get("/reconciliation", async (req, res) => {
         });
     }
 });
+
+
+// ==================================================
+// SUMMARY
+// ==================================================
+
 const PORT = 5000;
+
 app.get("/summary", async (req, res) => {
+
     try {
+
         const result = await pool.query(`
             SELECT
+
                 COUNT(*) AS total_transactions,
 
                 COUNT(*) FILTER (
@@ -113,22 +164,34 @@ app.get("/summary", async (req, res) => {
                 ) AS mismatches,
 
                 COALESCE(
+
                     SUM(
-                        ABS(t.transaction_amount - s.settlement_amount)
-                    ) FILTER (
+                        ABS(
+                            t.transaction_amount -
+                            s.settlement_amount
+                        )
+                    )
+
+                    FILTER (
                         WHERE t.transaction_amount != s.settlement_amount
                     ),
+
                     0
+
                 ) AS money_at_risk
 
             FROM transactions t
+
             JOIN settlements s
             ON t.transaction_id = s.transaction_id
         `);
 
+
         res.json(result.rows[0]);
 
+
     } catch (error) {
+
         console.error(error);
 
         res.status(500).json({
@@ -136,10 +199,20 @@ app.get("/summary", async (req, res) => {
         });
     }
 });
+
+
+// ==================================================
+// UPDATE CASE STATUS
+// ==================================================
+
 app.patch("/cases/:transaction_id", async (req, res) => {
+
     try {
+
         const { transaction_id } = req.params;
+
         const { status } = req.body;
+
 
         const allowedStatuses = [
             "OPEN",
@@ -147,31 +220,45 @@ app.patch("/cases/:transaction_id", async (req, res) => {
             "RESOLVED"
         ];
 
+
         if (!allowedStatuses.includes(status)) {
+
             return res.status(400).json({
                 message: "Invalid status"
             });
         }
 
+
         const result = await pool.query(
             `
             UPDATE mismatch_cases
+
             SET case_status = $1
+
             WHERE transaction_id = $2
+
             RETURNING *
             `,
-            [status, transaction_id]
+            [
+                status,
+                transaction_id
+            ]
         );
 
+
         if (result.rows.length === 0) {
+
             return res.status(404).json({
                 message: "Case not found"
             });
         }
 
+
         res.json(result.rows[0]);
 
+
     } catch (error) {
+
         console.error(error);
 
         res.status(500).json({
@@ -179,30 +266,48 @@ app.patch("/cases/:transaction_id", async (req, res) => {
         });
     }
 });
+
+
+// ==================================================
+// GET CASES
+// ==================================================
+
 app.get("/cases", async (req, res) => {
+
     try {
+
         const result = await pool.query(`
             SELECT
+
                 id,
                 transaction_id,
                 difference,
                 risk_level,
                 case_status,
                 created_at
+
             FROM mismatch_cases
+
             ORDER BY
+
                 CASE risk_level
+
                     WHEN 'HIGH' THEN 1
                     WHEN 'MEDIUM' THEN 2
                     WHEN 'LOW' THEN 3
                     ELSE 4
+
                 END,
+
                 created_at DESC
         `);
 
+
         res.json(result.rows);
 
+
     } catch (error) {
+
         console.error(error);
 
         res.status(500).json({
@@ -210,40 +315,75 @@ app.get("/cases", async (req, res) => {
         });
     }
 });
-app.patch("/approval-actions/:id", async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { decision, approved_by } = req.body;
 
-        if (!["APPROVED", "REJECTED"].includes(decision)) {
+
+// ==================================================
+// APPROVE / REJECT ACTION
+// ==================================================
+
+app.patch("/approval-actions/:id", async (req, res) => {
+
+    try {
+
+        const { id } = req.params;
+
+        const {
+            decision,
+            approved_by
+        } = req.body;
+
+
+        if (
+            !["APPROVED", "REJECTED"]
+            .includes(decision)
+        ) {
+
             return res.status(400).json({
                 message: "Invalid decision"
             });
         }
 
+
         const result = await pool.query(
             `
             UPDATE approval_actions
+
             SET
+
                 approval_status = $1,
+
                 approved_by = $2,
+
                 approved_at = CURRENT_TIMESTAMP
+
             WHERE id = $3
+
             AND approval_status = 'PENDING'
+
             RETURNING *
             `,
-            [decision, approved_by || "Merchant", id]
+            [
+                decision,
+                approved_by || "Merchant",
+                id
+            ]
         );
 
+
         if (result.rows.length === 0) {
+
             return res.status(404).json({
-                message: "Pending approval action not found"
+                message:
+                    "Pending approval action not found"
             });
         }
 
+
         res.json(result.rows[0]);
 
+
     } catch (error) {
+
         console.error(error);
 
         res.status(500).json({
@@ -251,10 +391,19 @@ app.patch("/approval-actions/:id", async (req, res) => {
         });
     }
 });
+
+
+// ==================================================
+// GET APPROVAL ACTIONS
+// ==================================================
+
 app.get("/approval-actions", async (req, res) => {
+
     try {
+
         const result = await pool.query(`
             SELECT
+
                 id,
                 case_id,
                 action_type,
@@ -266,13 +415,18 @@ app.get("/approval-actions", async (req, res) => {
                 execution_status,
                 verification_status,
                 created_at
+
             FROM approval_actions
+
             ORDER BY created_at DESC
         `);
 
+
         res.json(result.rows);
 
+
     } catch (error) {
+
         console.error(error);
 
         res.status(500).json({
@@ -280,174 +434,797 @@ app.get("/approval-actions", async (req, res) => {
         });
     }
 });
-app.post("/approval-actions/:id/execute", async (req, res) => {
+
+
+// ==================================================
+// CREATE APPROVAL ACTION
+// ==================================================
+
+app.post("/approval-actions/create", async (req, res) => {
+
     try {
-        const { id } = req.params;
 
-        const actionResult = await pool.query(
-            `
-            UPDATE approval_actions
-            SET execution_status = 'EXECUTED'
-            WHERE id = $1
-            AND approval_status = 'APPROVED'
-            AND execution_status = 'NOT_EXECUTED'
-            RETURNING *
-            `,
-            [id]
-        );
+        const {
+            case_id,
+            action_type,
+            ai_reason,
+            proposed_action
+        } = req.body;
 
-        if (actionResult.rows.length === 0) {
+
+        if (
+            !case_id ||
+            !action_type ||
+            !ai_reason ||
+            !proposed_action
+        ) {
+
             return res.status(400).json({
-                message: "Action cannot be executed. It must be approved and not already executed."
+
+                message:
+                    "case_id, action_type, ai_reason and proposed_action are required"
+
             });
         }
 
-        res.json({
-            message: "Action executed successfully",
-            action: actionResult.rows[0]
-        });
 
-    } catch (error) {
-        console.error(error);
+        // Check mismatch case
 
-        res.status(500).json({
-            message: "Could not execute action"
-        });
-    }
-});
-app.post("/approval-actions/:id/verify", async (req, res) => {
-    try {
-        const { id } = req.params;
+        const caseResult = await pool.query(
+            `
+            SELECT *
+
+            FROM mismatch_cases
+
+            WHERE id = $1
+            `,
+            [case_id]
+        );
+
+
+        if (caseResult.rows.length === 0) {
+
+            return res.status(404).json({
+                message:
+                    "Mismatch case not found"
+            });
+        }
+
+
+        // Prevent duplicate pending approval
+
+        const existingResult = await pool.query(
+            `
+            SELECT *
+
+            FROM approval_actions
+
+            WHERE case_id = $1
+
+            AND approval_status = 'PENDING'
+            `,
+            [case_id]
+        );
+
+
+        if (existingResult.rows.length > 0) {
+
+            return res.status(409).json({
+
+                message:
+                    "A pending approval already exists for this case.",
+
+                action:
+                    existingResult.rows[0]
+
+            });
+        }
+
+
+        // Create approval request
 
         const result = await pool.query(
             `
-            UPDATE approval_actions
-            SET verification_status = 'VERIFIED'
-            WHERE id = $1
-            AND approval_status = 'APPROVED'
-            AND execution_status = 'EXECUTED'
-            AND verification_status = 'NOT_VERIFIED'
+            INSERT INTO approval_actions
+            (
+                case_id,
+                action_type,
+                ai_reason,
+                proposed_action,
+                approval_status,
+                execution_status,
+                verification_status
+            )
+
+            VALUES
+            (
+                $1,
+                $2,
+                $3,
+                $4,
+                'PENDING',
+                'NOT_EXECUTED',
+                'NOT_VERIFIED'
+            )
+
             RETURNING *
+            `,
+            [
+                case_id,
+                action_type,
+                ai_reason,
+                proposed_action
+            ]
+        );
+
+
+        res.status(201).json({
+
+            message:
+                "Approval request created successfully.",
+
+            action:
+                result.rows[0]
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "Approval creation error:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            message:
+                "Could not create approval request",
+
+            error:
+                error.message
+
+        });
+    }
+});
+
+
+// ==================================================
+// CONTROLLED EXECUTION
+// ==================================================
+
+app.post("/approval-actions/:id/execute", async (req, res) => {
+
+    const client = await pool.connect();
+
+    try {
+
+        const { id } = req.params;
+
+
+        await client.query("BEGIN");
+
+
+        // 1. Get approval action
+
+        const actionResult = await client.query(
+            `
+            SELECT *
+
+            FROM approval_actions
+
+            WHERE id = $1
+
+            FOR UPDATE
             `,
             [id]
         );
 
-        if (result.rows.length === 0) {
-            return res.status(400).json({
+
+        if (actionResult.rows.length === 0) {
+
+            await client.query("ROLLBACK");
+
+            return res.status(404).json({
+
                 message:
-                    "Action cannot be verified. It must be approved and executed first."
+                    "Approval action not found."
+
             });
         }
 
+
+        const action = actionResult.rows[0];
+
+
+        // 2. Approval safety check
+
+        if (
+            action.approval_status !==
+            "APPROVED"
+        ) {
+
+            await client.query("ROLLBACK");
+
+            return res.status(400).json({
+
+                message:
+                    "Action must be approved before execution."
+
+            });
+        }
+
+
+        // 3. Prevent duplicate execution
+
+        if (
+            action.execution_status !==
+            "NOT_EXECUTED"
+        ) {
+
+            await client.query("ROLLBACK");
+
+            return res.status(400).json({
+
+                message:
+                    "Action has already been executed or cannot be executed."
+
+            });
+        }
+
+
+        // 4. Get mismatch case
+
+        const caseResult = await client.query(
+            `
+            SELECT *
+
+            FROM mismatch_cases
+
+            WHERE id = $1
+
+            FOR UPDATE
+            `,
+            [action.case_id]
+        );
+
+
+        if (caseResult.rows.length === 0) {
+
+            await client.query("ROLLBACK");
+
+            return res.status(404).json({
+
+                message:
+                    "Related mismatch case not found."
+
+            });
+        }
+
+
+        const mismatchCase =
+            caseResult.rows[0];
+
+
+        // 5. Never reopen resolved case
+
+        if (
+            mismatchCase.case_status ===
+            "RESOLVED"
+        ) {
+
+            await client.query("ROLLBACK");
+
+            return res.status(400).json({
+
+                message:
+                    "This case is already resolved. A resolved case cannot be executed again."
+
+            });
+        }
+
+
+        // 6. Perform actual controlled action
+
+        const caseUpdate =
+            await client.query(
+                `
+                UPDATE mismatch_cases
+
+                SET case_status =
+                    'INVESTIGATING'
+
+                WHERE id = $1
+
+                AND case_status IN
+                    ('OPEN', 'INVESTIGATING')
+
+                RETURNING *
+                `,
+                [action.case_id]
+            );
+
+
+        if (
+            caseUpdate.rows.length === 0
+        ) {
+
+            await client.query("ROLLBACK");
+
+            return res.status(400).json({
+
+                message:
+                    "Case cannot be moved to INVESTIGATING."
+
+            });
+        }
+
+
+        // 7. Mark execution only after
+        // business action succeeds
+
+        const executedResult =
+            await client.query(
+                `
+                UPDATE approval_actions
+
+                SET execution_status =
+                    'EXECUTED'
+
+                WHERE id = $1
+
+                AND approval_status =
+                    'APPROVED'
+
+                AND execution_status =
+                    'NOT_EXECUTED'
+
+                RETURNING *
+                `,
+                [id]
+            );
+
+
+        if (
+            executedResult.rows.length === 0
+        ) {
+
+            await client.query("ROLLBACK");
+
+            return res.status(500).json({
+
+                message:
+                    "Execution could not be recorded."
+
+            });
+        }
+
+
+        await client.query("COMMIT");
+
+
         res.json({
-            message: "Action verified successfully",
-            action: result.rows[0]
+
+            message:
+                "Approved action executed successfully.",
+
+            action:
+                executedResult.rows[0],
+
+            executed_business_action: {
+
+                case_id:
+                    caseUpdate.rows[0].id,
+
+                transaction_id:
+                    caseUpdate.rows[0].transaction_id,
+
+                new_case_status:
+                    caseUpdate.rows[0].case_status
+
+            }
+
         });
 
+
     } catch (error) {
-        console.error(error);
+
+        await client.query("ROLLBACK");
+
+        console.error(
+            "Execution error:",
+            error
+        );
+
 
         res.status(500).json({
-            message: "Could not verify action"
+
+            message:
+                "Could not execute action",
+
+            error:
+                error.message
+
+        });
+
+    } finally {
+
+        client.release();
+
+    }
+});
+
+
+// ==================================================
+// INDEPENDENT VERIFICATION
+// ==================================================
+
+app.post("/approval-actions/:id/verify", async (req, res) => {
+
+    try {
+
+        const { id } = req.params;
+
+
+        // 1. Get action
+
+        const actionResult = await pool.query(
+            `
+            SELECT *
+
+            FROM approval_actions
+
+            WHERE id = $1
+            `,
+            [id]
+        );
+
+
+        if (actionResult.rows.length === 0) {
+
+            return res.status(404).json({
+
+                message:
+                    "Approval action not found."
+
+            });
+        }
+
+
+        const action =
+            actionResult.rows[0];
+
+
+        // 2. Approval check
+
+        if (
+            action.approval_status !==
+            "APPROVED"
+        ) {
+
+            return res.status(400).json({
+
+                message:
+                    "Action must be approved before verification."
+
+            });
+        }
+
+
+        // 3. Execution check
+
+        if (
+            action.execution_status !==
+            "EXECUTED"
+        ) {
+
+            return res.status(400).json({
+
+                message:
+                    "Action must be executed before verification."
+
+            });
+        }
+
+
+        // 4. Get actual case
+
+        const caseResult = await pool.query(
+            `
+            SELECT *
+
+            FROM mismatch_cases
+
+            WHERE id = $1
+            `,
+            [action.case_id]
+        );
+
+
+        if (caseResult.rows.length === 0) {
+
+            return res.status(404).json({
+
+                message:
+                    "Related mismatch case not found."
+
+            });
+        }
+
+
+        const mismatchCase =
+            caseResult.rows[0];
+
+
+        // 5. Independently verify
+        // actual business result
+
+        if (
+            mismatchCase.case_status !==
+            "INVESTIGATING"
+        ) {
+
+            return res.status(400).json({
+
+                message:
+                    "Verification failed. The local case is not in INVESTIGATING status."
+
+            });
+        }
+
+
+        // 6. Mark verified
+
+        const verificationResult =
+            await pool.query(
+                `
+                UPDATE approval_actions
+
+                SET verification_status =
+                    'VERIFIED'
+
+                WHERE id = $1
+
+                AND approval_status =
+                    'APPROVED'
+
+                AND execution_status =
+                    'EXECUTED'
+
+                AND verification_status =
+                    'NOT_VERIFIED'
+
+                RETURNING *
+                `,
+                [id]
+            );
+
+
+        if (
+            verificationResult.rows.length === 0
+        ) {
+
+            return res.status(400).json({
+
+                message:
+                    "Action could not be marked as verified."
+
+            });
+        }
+
+
+        res.json({
+
+            message:
+                "Action independently verified successfully.",
+
+            action:
+                verificationResult.rows[0],
+
+            verification: {
+
+                case_id:
+                    mismatchCase.id,
+
+                transaction_id:
+                    mismatchCase.transaction_id,
+
+                case_status:
+                    mismatchCase.case_status,
+
+                result:
+                    "VERIFIED"
+
+            }
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "Verification error:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            message:
+                "Could not verify action",
+
+            error:
+                error.message
+
         });
     }
 });
+
+
+// ==================================================
+// RESOLVE CASE
+// ==================================================
+
 app.patch("/cases/:id/resolve", async (req, res) => {
+
     try {
+
         const { id } = req.params;
+
 
         const result = await pool.query(
             `
             UPDATE mismatch_cases
-            SET case_status = 'RESOLVED'
+
+            SET case_status =
+                'RESOLVED'
+
             WHERE id = $1
+
             RETURNING *
             `,
             [id]
         );
 
+
         if (result.rows.length === 0) {
+
             return res.status(404).json({
-                message: "Case not found"
+
+                message:
+                    "Case not found"
+
             });
         }
 
+
         res.json(result.rows[0]);
 
+
     } catch (error) {
+
         console.error(error);
 
+
         res.status(500).json({
-            message: "Could not resolve case"
+
+            message:
+                "Could not resolve case"
+
         });
     }
 });
+
+
+// ==================================================
+// INVESTIGATION ENGINE — STEP 39
+// ==================================================
+
 app.get("/investigate/:transaction_id", async (req, res) => {
+
     try {
-        const { transaction_id } = req.params;
+
+        const { transaction_id } =
+            req.params;
+
 
         // ==================================================
         // 1. GET TRANSACTION
         // ==================================================
 
-        const transactionResult = await pool.query(
-            `
-            SELECT
-                id,
-                transaction_id,
-                merchant_id,
-                transaction_amount,
-                transaction_date,
-                payment_status
-            FROM transactions
-            WHERE transaction_id = $1
-            `,
-            [transaction_id]
-        );
+        const transactionResult =
+            await pool.query(
+                `
+                SELECT
 
-        if (transactionResult.rows.length === 0) {
+                    id,
+                    transaction_id,
+                    merchant_id,
+                    transaction_amount,
+                    transaction_date,
+                    payment_status
+
+                FROM transactions
+
+                WHERE transaction_id = $1
+                `,
+                [transaction_id]
+            );
+
+
+        if (
+            transactionResult.rows.length === 0
+        ) {
+
             return res.status(404).json({
-                message: "Transaction not found"
+
+                message:
+                    "Transaction not found"
+
             });
         }
 
-        const transaction = transactionResult.rows[0];
+
+        const transaction =
+            transactionResult.rows[0];
+
 
         const transactionAmount =
-            Number(transaction.transaction_amount);
+            Number(
+                transaction.transaction_amount
+            );
 
 
         // ==================================================
         // 2. GET SETTLEMENT
         // ==================================================
 
-        const settlementResult = await pool.query(
-            `
-            SELECT
-                id,
-                settlement_id,
-                transaction_id,
-                settlement_amount,
-                settlement_date,
-                settlement_status
-            FROM settlements
-            WHERE transaction_id = $1
-            ORDER BY settlement_date DESC
-            LIMIT 1
-            `,
-            [transaction_id]
-        );
+        const settlementResult =
+            await pool.query(
+                `
+                SELECT
 
-        if (settlementResult.rows.length === 0) {
+                    id,
+                    settlement_id,
+                    transaction_id,
+                    settlement_amount,
+                    settlement_date,
+                    settlement_status
+
+                FROM settlements
+
+                WHERE transaction_id = $1
+
+                ORDER BY settlement_date DESC
+
+                LIMIT 1
+                `,
+                [transaction_id]
+            );
+
+
+        if (
+            settlementResult.rows.length === 0
+        ) {
+
             return res.status(404).json({
-                message: "Settlement record not found"
+
+                message:
+                    "Settlement record not found"
+
             });
         }
 
-        const settlement = settlementResult.rows[0];
+
+        const settlement =
+            settlementResult.rows[0];
+
 
         const settlementAmount =
-            Number(settlement.settlement_amount);
+            Number(
+                settlement.settlement_amount
+            );
 
 
         // ==================================================
@@ -456,8 +1233,10 @@ app.get("/investigate/:transaction_id", async (req, res) => {
 
         const difference =
             Number(
-                (transactionAmount - settlementAmount)
-                .toFixed(2)
+                (
+                    transactionAmount -
+                    settlementAmount
+                ).toFixed(2)
             );
 
 
@@ -465,23 +1244,30 @@ app.get("/investigate/:transaction_id", async (req, res) => {
         // 4. GET FINANCIAL ADJUSTMENTS
         // ==================================================
 
-        const adjustmentResult = await pool.query(
-            `
-            SELECT
-                id,
-                transaction_id,
-                adjustment_type,
-                amount,
-                reason,
-                created_at
-            FROM settlement_adjustments
-            WHERE transaction_id = $1
-            ORDER BY created_at DESC
-            `,
-            [transaction_id]
-        );
+        const adjustmentResult =
+            await pool.query(
+                `
+                SELECT
 
-        const adjustments = adjustmentResult.rows;
+                    id,
+                    transaction_id,
+                    adjustment_type,
+                    amount,
+                    reason,
+                    created_at
+
+                FROM settlement_adjustments
+
+                WHERE transaction_id = $1
+
+                ORDER BY created_at DESC
+                `,
+                [transaction_id]
+            );
+
+
+        const adjustments =
+            adjustmentResult.rows;
 
 
         // ==================================================
@@ -490,13 +1276,19 @@ app.get("/investigate/:transaction_id", async (req, res) => {
 
         const totalAdjustments =
             Number(
+
                 adjustments
                     .reduce(
+
                         (total, item) =>
-                            total + Number(item.amount),
+                            total +
+                            Number(item.amount),
+
                         0
                     )
+
                     .toFixed(2)
+
             );
 
 
@@ -506,47 +1298,83 @@ app.get("/investigate/:transaction_id", async (req, res) => {
 
         const investigation = {
 
-            transaction_id: transaction.transaction_id,
+            transaction_id:
+                transaction.transaction_id,
 
-            merchant_id: transaction.merchant_id,
+            merchant_id:
+                transaction.merchant_id,
 
-            investigation_status: null,
+            investigation_status:
+                null,
 
             transaction: {
-                amount: transactionAmount,
-                date: transaction.transaction_date,
-                payment_status: transaction.payment_status
+
+                amount:
+                    transactionAmount,
+
+                date:
+                    transaction.transaction_date,
+
+                payment_status:
+                    transaction.payment_status
+
             },
 
             settlement: {
-                settlement_id: settlement.settlement_id,
-                amount: settlementAmount,
-                date: settlement.settlement_date,
-                status: settlement.settlement_status
+
+                settlement_id:
+                    settlement.settlement_id,
+
+                amount:
+                    settlementAmount,
+
+                date:
+                    settlement.settlement_date,
+
+                status:
+                    settlement.settlement_status
+
             },
 
             mismatch: {
-                detected: difference !== 0,
-                transaction_amount: transactionAmount,
-                settlement_amount: settlementAmount,
-                difference: difference
+
+                detected:
+                    difference !== 0,
+
+                transaction_amount:
+                    transactionAmount,
+
+                settlement_amount:
+                    settlementAmount,
+
+                difference:
+                    difference
+
             },
 
             financial_evidence: [],
 
-            root_cause_type: null,
+            root_cause_type:
+                null,
 
-            root_cause: null,
+            root_cause:
+                null,
 
-            confidence: 0,
+            confidence:
+                0,
 
-            unexplained_difference: difference,
+            unexplained_difference:
+                difference,
 
-            recommended_action: null,
+            recommended_action:
+                null,
 
-            human_approval_required: true,
+            human_approval_required:
+                true,
 
-            automatic_action: false
+            automatic_action:
+                false
+
         };
 
 
@@ -559,23 +1387,42 @@ app.get("/investigate/:transaction_id", async (req, res) => {
             investigation.investigation_status =
                 "NO_MISMATCH";
 
+
             investigation.root_cause_type =
                 "NO_DISCREPANCY";
+
 
             investigation.root_cause =
                 "Transaction amount and settlement amount match.";
 
+
             investigation.financial_evidence.push({
-                check: "Transaction vs settlement",
-                transaction_amount: transactionAmount,
-                settlement_amount: settlementAmount,
-                difference: 0,
-                result: "MATCH"
+
+                check:
+                    "Transaction vs settlement",
+
+                transaction_amount:
+                    transactionAmount,
+
+                settlement_amount:
+                    settlementAmount,
+
+                difference:
+                    0,
+
+                result:
+                    "MATCH"
+
             });
 
-            investigation.unexplained_difference = 0;
 
-            investigation.confidence = 100;
+            investigation.unexplained_difference =
+                0;
+
+
+            investigation.confidence =
+                100;
+
 
             investigation.recommended_action =
                 "No corrective action required.";
@@ -594,25 +1441,47 @@ app.get("/investigate/:transaction_id", async (req, res) => {
 
 
             investigation.financial_evidence.push({
-                check: "Transaction amount",
-                value: transactionAmount,
-                result: "RECORDED"
+
+                check:
+                    "Transaction amount",
+
+                value:
+                    transactionAmount,
+
+                result:
+                    "RECORDED"
+
             });
 
 
             investigation.financial_evidence.push({
-                check: "Settlement amount",
-                value: settlementAmount,
-                result: "RECORDED"
+
+                check:
+                    "Settlement amount",
+
+                value:
+                    settlementAmount,
+
+                result:
+                    "RECORDED"
+
             });
 
 
             investigation.financial_evidence.push({
-                check: "Amount difference",
+
+                check:
+                    "Amount difference",
+
                 calculation:
                     `${transactionAmount} - ${settlementAmount}`,
-                difference: difference,
-                result: "MISMATCH"
+
+                difference:
+                    difference,
+
+                result:
+                    "MISMATCH"
+
             });
 
 
@@ -620,61 +1489,95 @@ app.get("/investigate/:transaction_id", async (req, res) => {
             // 9. CHECK FINANCIAL ADJUSTMENTS
             // ==================================================
 
-            if (adjustments.length > 0) {
+            if (
+                adjustments.length > 0
+            ) {
 
-                adjustments.forEach(adjustment => {
+                adjustments.forEach(
+                    adjustment => {
 
-                    investigation.financial_evidence.push({
-                        check: "Financial adjustment",
-                        adjustment_type:
-                            adjustment.adjustment_type,
-                        amount:
-                            Number(adjustment.amount),
-                        reason:
-                            adjustment.reason,
-                        result: "FOUND"
-                    });
+                        investigation.financial_evidence.push({
 
-                });
+                            check:
+                                "Financial adjustment",
+
+                            adjustment_type:
+                                adjustment.adjustment_type,
+
+                            amount:
+                                Number(
+                                    adjustment.amount
+                                ),
+
+                            reason:
+                                adjustment.reason,
+
+                            result:
+                                "FOUND"
+
+                        });
+
+                    }
+                );
 
 
-                // ------------------------------------------------
-                // CHECK WHETHER ADJUSTMENTS EXPLAIN MISMATCH
-                // ------------------------------------------------
+                // FULLY EXPLAINED
 
                 if (
-                    Number(totalAdjustments.toFixed(2)) ===
+
+                    Number(
+                        totalAdjustments.toFixed(2)
+                    )
+
+                    ===
+
                     Math.abs(difference)
+
                 ) {
 
                     const types =
                         [
                             ...new Set(
+
                                 adjustments.map(
                                     item =>
                                         item.adjustment_type
                                 )
+
                             )
                         ];
+
 
                     investigation.root_cause_type =
                         "FINANCIAL_ADJUSTMENT";
 
+
                     investigation.root_cause =
                         `The ₹${Math.abs(difference)} settlement difference is fully explained by recorded financial adjustment(s): ${types.join(", ")}.`;
 
-                    investigation.unexplained_difference = 0;
 
-                    investigation.confidence = 98;
+                    investigation.unexplained_difference =
+                        0;
+
+
+                    investigation.confidence =
+                        98;
 
 
                     investigation.financial_evidence.push({
-                        check: "Adjustment reconciliation",
+
+                        check:
+                            "Adjustment reconciliation",
+
                         total_adjustments:
                             totalAdjustments,
+
                         mismatch_amount:
                             Math.abs(difference),
-                        result: "FULLY_EXPLAINED"
+
+                        result:
+                            "FULLY_EXPLAINED"
+
                     });
 
 
@@ -684,44 +1587,61 @@ app.get("/investigate/:transaction_id", async (req, res) => {
                 }
 
 
-                // ------------------------------------------------
                 // PARTIALLY EXPLAINED
-                // ------------------------------------------------
 
                 else if (
+
                     totalAdjustments <
                     Math.abs(difference)
+
                 ) {
 
                     const remainingDifference =
                         Number(
+
                             (
+
                                 Math.abs(difference) -
                                 totalAdjustments
+
                             ).toFixed(2)
+
                         );
+
 
                     investigation.root_cause_type =
                         "PARTIALLY_EXPLAINED";
 
+
                     investigation.root_cause =
                         `Recorded financial adjustments explain ₹${totalAdjustments} of the ₹${Math.abs(difference)} mismatch. ₹${remainingDifference} remains unexplained.`;
+
 
                     investigation.unexplained_difference =
                         remainingDifference;
 
-                    investigation.confidence = 90;
+
+                    investigation.confidence =
+                        90;
 
 
                     investigation.financial_evidence.push({
-                        check: "Partial reconciliation",
+
+                        check:
+                            "Partial reconciliation",
+
                         total_adjustments:
                             totalAdjustments,
+
                         mismatch_amount:
                             Math.abs(difference),
+
                         unexplained:
                             remainingDifference,
-                        result: "PARTIALLY_EXPLAINED"
+
+                        result:
+                            "PARTIALLY_EXPLAINED"
+
                     });
 
 
@@ -731,41 +1651,56 @@ app.get("/investigate/:transaction_id", async (req, res) => {
                 }
 
 
-                // ------------------------------------------------
                 // ADJUSTMENT GREATER THAN MISMATCH
-                // ------------------------------------------------
 
                 else {
 
                     const excess =
                         Number(
+
                             (
+
                                 totalAdjustments -
                                 Math.abs(difference)
+
                             ).toFixed(2)
+
                         );
+
 
                     investigation.root_cause_type =
                         "ADJUSTMENT_REQUIRES_REVIEW";
 
+
                     investigation.root_cause =
                         `Financial adjustments total ₹${totalAdjustments}, which is greater than the ₹${Math.abs(difference)} mismatch. The records require human review.`;
+
 
                     investigation.unexplained_difference =
                         difference;
 
-                    investigation.confidence = 85;
+
+                    investigation.confidence =
+                        85;
 
 
                     investigation.financial_evidence.push({
-                        check: "Adjustment consistency",
+
+                        check:
+                            "Adjustment consistency",
+
                         total_adjustments:
                             totalAdjustments,
+
                         mismatch_amount:
                             Math.abs(difference),
+
                         excess:
                             excess,
-                        result: "REQUIRES_REVIEW"
+
+                        result:
+                            "REQUIRES_REVIEW"
+
                     });
 
 
@@ -786,26 +1721,38 @@ app.get("/investigate/:transaction_id", async (req, res) => {
                 investigation.root_cause_type =
                     "UNEXPLAINED_SETTLEMENT_DIFFERENCE";
 
+
                 investigation.root_cause =
                     `A ₹${Math.abs(difference)} difference exists between the transaction and settlement records, but no financial adjustment record explains the difference.`;
+
 
                 investigation.unexplained_difference =
                     Math.abs(difference);
 
-                investigation.confidence = 70;
+
+                investigation.confidence =
+                    70;
 
 
                 investigation.financial_evidence.push({
-                    check: "Financial adjustments",
-                    result: "NOT_FOUND",
+
+                    check:
+                        "Financial adjustments",
+
+                    result:
+                        "NOT_FOUND",
+
                     explanation:
                         "No fee, refund, tax, adjustment, chargeback, or other financial adjustment record was found."
+
                 });
 
 
                 investigation.recommended_action =
                     "Raise a settlement investigation and request human review.";
+
             }
+
         }
 
 
@@ -814,16 +1761,26 @@ app.get("/investigate/:transaction_id", async (req, res) => {
         // ==================================================
 
         if (
-            investigation.confidence < 95 ||
+
+            investigation.confidence < 95
+
+            ||
+
             investigation.unexplained_difference !== 0
+
         ) {
 
-            investigation.human_approval_required = true;
+            investigation.human_approval_required =
+                true;
 
-            investigation.automatic_action = false;
+
+            investigation.automatic_action =
+                false;
+
 
             investigation.recommended_action +=
                 " Automatic financial execution is blocked until human approval and verification.";
+
         }
 
 
@@ -831,7 +1788,10 @@ app.get("/investigate/:transaction_id", async (req, res) => {
         // 12. FINAL RESPONSE
         // ==================================================
 
-        res.json(investigation);
+        res.json(
+            investigation
+        );
+
 
     } catch (error) {
 
@@ -840,12 +1800,28 @@ app.get("/investigate/:transaction_id", async (req, res) => {
             error
         );
 
+
         res.status(500).json({
-            message: "Investigation failed",
-            error: error.message
+
+            message:
+                "Investigation failed",
+
+            error:
+                error.message
+
         });
     }
 });
+
+
+// ==================================================
+// START SERVER
+// ==================================================
+
 app.listen(PORT, () => {
-    console.log(`PayTruth AI server running on http://localhost:${PORT}`);
+
+    console.log(
+        `PayTruth AI server running on http://localhost:${PORT}`
+    );
+
 });
