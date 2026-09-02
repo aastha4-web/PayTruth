@@ -14,7 +14,65 @@ const pool = new Pool({
     password: "paytruth@123",
     port: 5432,
 });
+// ==================================================
+// AUDIT TRAIL ENGINE — STEP 56
+// ==================================================
 
+async function createAuditLog({
+    caseId = null,
+    actionId = null,
+    eventType,
+    actor = "SYSTEM",
+    description,
+    oldStatus = null,
+    newStatus = null,
+    metadata = {}
+}) {
+
+    try {
+
+        await pool.query(
+            `
+            INSERT INTO audit_logs
+            (
+                case_id,
+                action_id,
+                event_type,
+                actor,
+                description,
+                old_status,
+                new_status,
+                metadata
+            )
+            VALUES
+            (
+                $1,
+                $2,
+                $3,
+                $4,
+                $5,
+                $6,
+                $7,
+                $8
+            )
+            `,
+            [
+                caseId,
+                actionId,
+                eventType,
+                actor,
+                description,
+                oldStatus,
+                newStatus,
+                metadata
+            ]
+        );
+
+    } catch (error) {
+    console.error("Audit log error:", error);
+    throw error;
+}
+}
 
 // ==================================================
 // HOME
@@ -377,6 +435,48 @@ app.patch("/approval-actions/:id", async (req, res) => {
                     "Pending approval action not found"
             });
         }
+        // ==========================================
+// AUDIT APPROVAL DECISION
+// ==========================================
+
+const updatedAction = result.rows[0];
+
+await createAuditLog({
+
+    caseId: updatedAction.case_id,
+
+    actionId: updatedAction.id,
+
+    eventType:
+        decision === "APPROVED"
+            ? "ACTION_APPROVED"
+            : "ACTION_REJECTED",
+
+    actor:
+        updatedAction.approved_by || "Merchant",
+
+    description:
+        decision === "APPROVED"
+            ? "Merchant approved the proposed PayTruth action."
+            : "Merchant rejected the proposed PayTruth action.",
+
+    oldStatus:
+        "PENDING",
+
+    newStatus:
+        decision,
+
+    metadata: {
+
+        action_type:
+            updatedAction.action_type,
+
+        proposed_action:
+            updatedAction.proposed_action
+
+    }
+
+});
 
 
         res.json(result.rows[0]);
@@ -690,6 +790,43 @@ app.post("/approval-actions/:id/execute", async (req, res) => {
 
         // 6. Commit both changes together
         await client.query("COMMIT");
+        // ==========================================
+// AUDIT ACTION EXECUTION
+// ==========================================
+
+await createAuditLog({
+
+    caseId: action.case_id,
+
+    actionId: action.id,
+
+    eventType: "ACTION_EXECUTED",
+
+    actor: "SYSTEM",
+
+    description:
+        "Approved PayTruth action was executed in the controlled workflow.",
+
+    oldStatus:
+        "NOT_EXECUTED",
+
+    newStatus:
+        "EXECUTED",
+
+    metadata: {
+
+        action_type:
+            action.action_type,
+
+        execution_mode:
+            "SIMULATED / SANDBOX",
+
+        real_money_movement:
+            false
+
+    }
+
+});
 
         res.json({
             message: "Settlement investigation executed successfully",
@@ -712,9 +849,8 @@ app.post("/approval-actions/:id/execute", async (req, res) => {
         client.release();
     }
 });
-
 // ==================================================
-// INDEPENDENT VERIFICATION
+// INDEPENDENT VERIFICATION — STEP 54
 // ==================================================
 
 app.post("/approval-actions/:id/verify", async (req, res) => {
@@ -724,14 +860,20 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
         const { id } = req.params;
 
 
-        // 1. Get action
+        // ==========================================
+        // 1. GET APPROVAL ACTION
+        // ==========================================
 
         const actionResult = await pool.query(
             `
-            SELECT *
-
+            SELECT
+                id,
+                case_id,
+                action_type,
+                approval_status,
+                execution_status,
+                verification_status
             FROM approval_actions
-
             WHERE id = $1
             `,
             [id]
@@ -746,6 +888,7 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                     "Approval action not found."
 
             });
+
         }
 
 
@@ -753,7 +896,9 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
             actionResult.rows[0];
 
 
-        // 2. Approval check
+        // ==========================================
+        // 2. APPROVAL SAFETY CHECK
+        // ==========================================
 
         if (
             action.approval_status !==
@@ -766,10 +911,13 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                     "Action must be approved before verification."
 
             });
+
         }
 
 
-        // 3. Execution check
+        // ==========================================
+        // 3. EXECUTION SAFETY CHECK
+        // ==========================================
 
         if (
             action.execution_status !==
@@ -782,17 +930,43 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                     "Action must be executed before verification."
 
             });
+
         }
 
 
-        // 4. Get actual case
+        // ==========================================
+        // 4. PREVENT DUPLICATE VERIFICATION
+        // ==========================================
+
+        if (
+            action.verification_status ===
+            "VERIFIED"
+        ) {
+
+            return res.status(400).json({
+
+                message:
+                    "Action has already been verified."
+
+            });
+
+        }
+
+
+        // ==========================================
+        // 5. GET ACTUAL MISMATCH CASE
+        // ==========================================
 
         const caseResult = await pool.query(
             `
-            SELECT *
-
+            SELECT
+                id,
+                transaction_id,
+                difference,
+                risk_level,
+                case_status,
+                created_at
             FROM mismatch_cases
-
             WHERE id = $1
             `,
             [action.case_id]
@@ -807,6 +981,7 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                     "Related mismatch case not found."
 
             });
+
         }
 
 
@@ -814,32 +989,406 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
             caseResult.rows[0];
 
 
-        // 5. Independently verify
-        // actual business result
+        // ==========================================
+        // 6. GET ACTUAL TRANSACTION
+        // ==========================================
 
-        if (
-            mismatchCase.case_status !==
-            "INVESTIGATING"
-        ) {
+        const transactionResult = await pool.query(
+            `
+            SELECT
+                transaction_id,
+                merchant_id,
+                transaction_amount,
+                payment_status
+            FROM transactions
+            WHERE transaction_id = $1
+            `,
+            [mismatchCase.transaction_id]
+        );
+
+
+        if (transactionResult.rows.length === 0) {
 
             return res.status(400).json({
 
                 message:
-                    "Verification failed. The local case is not in INVESTIGATING status."
+                    "Verification failed. Transaction record not found."
 
             });
+
         }
 
 
-        // 6. Mark verified
+        const transaction =
+            transactionResult.rows[0];
 
-        const verificationResult =
+
+        const transactionAmount =
+            Number(
+                transaction.transaction_amount
+            );
+
+
+        // ==========================================
+        // 7. GET ACTUAL SETTLEMENT
+        // ==========================================
+
+        const settlementResult = await pool.query(
+            `
+            SELECT
+                settlement_id,
+                transaction_id,
+                settlement_amount,
+                settlement_status,
+                settlement_date
+            FROM settlements
+            WHERE transaction_id = $1
+            ORDER BY settlement_date DESC
+            LIMIT 1
+            `,
+            [mismatchCase.transaction_id]
+        );
+
+
+        if (settlementResult.rows.length === 0) {
+
+            return res.status(400).json({
+
+                message:
+                    "Verification failed. Settlement record not found."
+
+            });
+
+        }
+
+
+        const settlement =
+            settlementResult.rows[0];
+
+
+        const settlementAmount =
+            Number(
+                settlement.settlement_amount
+            );
+
+
+        // ==========================================
+        // 8. RE-CALCULATE ACTUAL DIFFERENCE
+        // ==========================================
+
+        const actualDifference =
+            Math.abs(
+                transactionAmount -
+                settlementAmount
+            );
+
+
+        // ==========================================
+        // 9. GET ACTUAL FINANCIAL ADJUSTMENTS
+        // ==========================================
+
+        const adjustmentResult = await pool.query(
+            `
+            SELECT
+                id,
+                transaction_id,
+                adjustment_type,
+                amount,
+                reason,
+                created_at
+            FROM settlement_adjustments
+            WHERE transaction_id = $1
+            ORDER BY created_at
+            `,
+            [mismatchCase.transaction_id]
+        );
+
+
+        const adjustments =
+            adjustmentResult.rows.map(
+                adjustment => ({
+
+                    id:
+                        adjustment.id,
+
+                    adjustment_type:
+                        adjustment.adjustment_type,
+
+                    amount:
+                        Number(
+                            adjustment.amount
+                        ),
+
+                    reason:
+                        adjustment.reason,
+
+                    created_at:
+                        adjustment.created_at
+
+                })
+            );
+
+
+        // ==========================================
+        // 10. CALCULATE ACTUAL ADJUSTMENT TOTAL
+        // ==========================================
+
+        const totalAdjustments =
+            adjustments.reduce(
+                (
+                    sum,
+                    adjustment
+                ) =>
+                    sum +
+                    adjustment.amount,
+                0
+            );
+
+
+        // ==========================================
+        // 11. DETECT CONTRADICTORY EVIDENCE
+        // ==========================================
+
+        const adjustmentAmounts =
+            adjustments.map(
+                adjustment =>
+                    adjustment.amount
+            );
+
+
+        const uniqueAmounts =
+            [
+                ...new Set(
+                    adjustmentAmounts
+                )
+            ];
+
+
+        const contradictionDetected =
+            uniqueAmounts.length > 1 &&
+            adjustments.length > 1;
+
+
+        // ==========================================
+        // 12. CALCULATE EXPLAINED AMOUNT
+        // ==========================================
+
+        let explainedDifference = 0;
+
+        let unexplainedDifference =
+            actualDifference;
+
+
+        if (
+            !contradictionDetected
+        ) {
+
+            if (
+                totalAdjustments <=
+                actualDifference
+            ) {
+
+                explainedDifference =
+                    totalAdjustments;
+
+                unexplainedDifference =
+                    actualDifference -
+                    totalAdjustments;
+
+            } else {
+
+                explainedDifference =
+                    actualDifference;
+
+                unexplainedDifference =
+                    0;
+
+            }
+
+        }
+
+
+        // ==========================================
+        // 13. INDEPENDENT VERIFICATION DECISION
+        // ==========================================
+
+        let verificationPassed =
+            false;
+
+        let verificationResultText;
+
+        let verificationReason;
+
+
+        // ------------------------------------------
+        // CASE A: FINANCIAL RECORDS MATCH
+        // ------------------------------------------
+
+        if (
+            actualDifference === 0
+        ) {
+
+            verificationPassed =
+                true;
+
+            verificationResultText =
+                "VERIFIED";
+
+            verificationReason =
+                "Transaction and settlement records now match.";
+
+        }
+
+
+        // ------------------------------------------
+        // CASE B: FULLY EXPLAINED MISMATCH
+        // ------------------------------------------
+
+        else if (
+            !contradictionDetected &&
+            adjustments.length > 0 &&
+            unexplainedDifference === 0
+        ) {
+
+            verificationPassed =
+                true;
+
+            verificationResultText =
+                "VERIFIED";
+
+            verificationReason =
+                `The actual ₹${actualDifference} settlement difference is fully supported by recorded financial adjustment evidence.`;
+
+        }
+
+
+        // ------------------------------------------
+        // CASE C: CONTRADICTION
+        // ------------------------------------------
+
+        else if (
+            contradictionDetected
+        ) {
+
+            verificationPassed =
+                false;
+
+            verificationResultText =
+                "NOT_VERIFIED";
+
+            verificationReason =
+                "Verification failed because conflicting financial adjustment records were detected.";
+
+        }
+
+
+        // ------------------------------------------
+        // CASE D: PARTIAL EVIDENCE
+        // ------------------------------------------
+
+        else if (
+            unexplainedDifference > 0 &&
+            adjustments.length > 0
+        ) {
+
+            verificationPassed =
+                false;
+
+            verificationResultText =
+                "NOT_VERIFIED";
+
+            verificationReason =
+                `Verification failed because ₹${unexplainedDifference} of the actual financial difference remains unexplained.`;
+
+        }
+
+
+        // ------------------------------------------
+        // CASE E: NO EVIDENCE
+        // ------------------------------------------
+
+        else {
+
+            verificationPassed =
+                false;
+
+            verificationResultText =
+                "NOT_VERIFIED";
+
+            verificationReason =
+                "Verification failed because no supporting financial evidence was found.";
+
+        }
+
+
+        // ==========================================
+        // 14. SAFETY BLOCK
+        // ==========================================
+
+        if (
+            !verificationPassed
+        ) {
+
+            return res.status(409).json({
+
+                message:
+                    "Independent verification failed. The action remains unverified.",
+
+                verification: {
+
+                    result:
+                        verificationResultText,
+
+                    reason:
+                        verificationReason,
+
+                    transaction_id:
+                        mismatchCase.transaction_id,
+
+                    transaction_amount:
+                        transactionAmount,
+
+                    settlement_amount:
+                        settlementAmount,
+
+                    actual_difference:
+                        actualDifference,
+
+                    total_adjustments:
+                        totalAdjustments,
+
+                    explained_difference:
+                        explainedDifference,
+
+                    unexplained_difference:
+                        unexplainedDifference,
+
+                    contradiction_detected:
+                        contradictionDetected
+
+                },
+
+                safety:
+
+                    "Case must not be resolved until financial verification succeeds."
+
+            });
+
+        }
+
+
+        // ==========================================
+        // 15. MARK ACTION VERIFIED
+        // ==========================================
+
+        const verificationUpdate =
             await pool.query(
                 `
                 UPDATE approval_actions
 
-                SET verification_status =
-                    'VERIFIED'
+                SET
+                    verification_status =
+                        'VERIFIED'
 
                 WHERE id = $1
 
@@ -856,10 +1405,11 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                 `,
                 [id]
             );
+            
 
 
         if (
-            verificationResult.rows.length === 0
+            verificationUpdate.rows.length === 0
         ) {
 
             return res.status(400).json({
@@ -868,18 +1418,66 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                     "Action could not be marked as verified."
 
             });
-        }
 
+        }
+        // ==========================================
+// AUDIT INDEPENDENT VERIFICATION
+// ==========================================
+
+await createAuditLog({
+
+    caseId: action.case_id,
+
+    actionId: action.id,
+
+    eventType: "ACTION_VERIFIED",
+
+    actor: "SYSTEM",
+
+    description:
+        "PayTruth independently verified the action against the underlying financial records.",
+
+    oldStatus:
+        "NOT_VERIFIED",
+
+    newStatus:
+        "VERIFIED",
+
+    metadata: {
+
+        verification_type:
+            "INDEPENDENT_FINANCIAL_RECORD_CHECK",
+
+        independently_verified:
+            true,
+
+        real_money_movement:
+            false
+
+    }
+
+});
+
+
+        // ==========================================
+        // 16. SUCCESS RESPONSE
+        // ==========================================
 
         res.json({
 
             message:
-                "Action independently verified successfully.",
+                "Independent financial verification completed successfully.",
 
             action:
-                verificationResult.rows[0],
+                verificationUpdate.rows[0],
 
             verification: {
+
+                result:
+                    "VERIFIED",
+
+                reason:
+                    verificationReason,
 
                 case_id:
                     mismatchCase.id,
@@ -887,11 +1485,48 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                 transaction_id:
                     mismatchCase.transaction_id,
 
-                case_status:
-                    mismatchCase.case_status,
+                transaction_amount:
+                    transactionAmount,
 
-                result:
-                    "VERIFIED"
+                settlement_amount:
+                    settlementAmount,
+
+                actual_difference:
+                    actualDifference,
+
+                total_adjustments:
+                    totalAdjustments,
+
+                explained_difference:
+                    explainedDifference,
+
+                unexplained_difference:
+                    unexplainedDifference,
+
+                contradiction_detected:
+                    contradictionDetected,
+
+                transaction_record_checked:
+                    true,
+
+                settlement_record_checked:
+                    true,
+
+                adjustment_records_checked:
+                    true
+
+            },
+
+            safety: {
+
+                real_money_movement:
+                    false,
+
+                human_approval:
+                    true,
+
+                independently_verified:
+                    true
 
             }
 
@@ -901,7 +1536,7 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "Verification error:",
+            "Independent verification error:",
             error
         );
 
@@ -909,18 +1544,20 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
         res.status(500).json({
 
             message:
-                "Could not verify action",
+                "Could not independently verify action",
 
             error:
                 error.message
 
         });
+
     }
+
 });
 
 
 // ==================================================
-// RESOLVE CASE
+// SECURE CASE RESOLUTION — STEP 55
 // ==================================================
 
 app.patch("/cases/:id/resolve", async (req, res) => {
@@ -930,14 +1567,134 @@ app.patch("/cases/:id/resolve", async (req, res) => {
         const { id } = req.params;
 
 
+        // ==========================================
+        // 1. CHECK CASE
+        // ==========================================
+
+        const caseResult = await pool.query(
+            `
+            SELECT
+                id,
+                transaction_id,
+                difference,
+                risk_level,
+                case_status,
+                created_at
+            FROM mismatch_cases
+            WHERE id = $1
+            `,
+            [id]
+        );
+
+
+        if (caseResult.rows.length === 0) {
+
+            return res.status(404).json({
+
+                message:
+                    "Case not found"
+
+            });
+
+        }
+
+
+        const mismatchCase =
+            caseResult.rows[0];
+
+
+        // ==========================================
+        // 2. CHECK VERIFIED ACTION
+        // ==========================================
+
+        const actionResult = await pool.query(
+            `
+            SELECT
+                id,
+                case_id,
+                action_type,
+                approval_status,
+                execution_status,
+                verification_status,
+                approved_by,
+                approved_at
+            FROM approval_actions
+            WHERE case_id = $1
+
+            AND approval_status = 'APPROVED'
+
+            AND execution_status = 'EXECUTED'
+
+            AND verification_status = 'VERIFIED'
+
+            ORDER BY created_at DESC
+
+            LIMIT 1
+            `,
+            [id]
+        );
+
+
+        if (actionResult.rows.length === 0) {
+
+            return res.status(409).json({
+
+                message:
+                    "Case cannot be resolved because no successfully verified action exists.",
+
+                case_id:
+                    mismatchCase.id,
+
+                transaction_id:
+                    mismatchCase.transaction_id,
+
+                safety:
+                    "Human approval, execution and independent verification are required before case resolution."
+
+            });
+
+        }
+
+
+        const verifiedAction =
+            actionResult.rows[0];
+
+
+        // ==========================================
+        // 3. CHECK CURRENT CASE STATUS
+        // ==========================================
+
+        if (
+            mismatchCase.case_status ===
+            "RESOLVED"
+        ) {
+
+            return res.status(400).json({
+
+                message:
+                    "Case is already resolved.",
+
+                case:
+                    mismatchCase
+
+            });
+
+        }
+
+
+        // ==========================================
+        // 4. RESOLVE CASE
+        // ==========================================
+
         const result = await pool.query(
             `
             UPDATE mismatch_cases
 
-            SET case_status =
-                'RESOLVED'
+            SET case_status = 'RESOLVED'
 
             WHERE id = $1
+
+            AND case_status != 'RESOLVED'
 
             RETURNING *
             `,
@@ -947,30 +1704,135 @@ app.patch("/cases/:id/resolve", async (req, res) => {
 
         if (result.rows.length === 0) {
 
-            return res.status(404).json({
+            return res.status(400).json({
 
                 message:
-                    "Case not found"
+                    "Case could not be resolved."
 
             });
+
         }
+        // ==========================================
+// AUDIT CASE RESOLUTION
+// ==========================================
+
+const resolvedCase = result.rows[0];
+
+await createAuditLog({
+
+    caseId:
+        resolvedCase.id,
+
+    actionId:
+        verifiedAction.id,
+
+    eventType:
+        "CASE_RESOLVED",
+
+    actor:
+        "SYSTEM",
+
+    description:
+        "PayTruth resolved the mismatch case after human approval, controlled execution and independent verification.",
+
+    oldStatus:
+        "INVESTIGATING",
+
+    newStatus:
+        "RESOLVED",
+
+    metadata: {
+
+        transaction_id:
+            resolvedCase.transaction_id,
+
+        human_approval:
+            true,
+
+        action_executed:
+            true,
+
+        independently_verified:
+            true,
+
+        real_money_movement:
+            false
+
+    }
+
+});
 
 
-        res.json(result.rows[0]);
+        // ==========================================
+        // 5. SUCCESS RESPONSE
+        // ==========================================
+
+        res.json({
+
+            message:
+                "Case resolved successfully after verified financial action.",
+
+            case:
+                result.rows[0],
+
+            verified_action: {
+
+                id:
+                    verifiedAction.id,
+
+                action_type:
+                    verifiedAction.action_type,
+
+                approval_status:
+                    verifiedAction.approval_status,
+
+                execution_status:
+                    verifiedAction.execution_status,
+
+                verification_status:
+                    verifiedAction.verification_status
+
+            },
+
+            workflow: {
+
+                human_approved:
+                    true,
+
+                action_executed:
+                    true,
+
+                independently_verified:
+                    true,
+
+                case_resolved:
+                    true
+
+            }
+
+        });
 
 
     } catch (error) {
 
-        console.error(error);
+        console.error(
+            "Case resolution error:",
+            error
+        );
 
 
         res.status(500).json({
 
             message:
-                "Could not resolve case"
+                "Could not resolve case",
+
+            error:
+                error.message
 
         });
+
     }
+
 });
 
 
@@ -1428,146 +2290,464 @@ app.get("/investigate/:transaction_id", async (req, res) => {
 
 
         // ==========================================
-        // 8. ROOT CAUSE ENGINE
-        // ==========================================
+        // // ==========================================
+// 8. CONFIDENCE + ACCURACY ENGINE
+// ==========================================
 
-        let rootCauseType;
-        let rootCause;
-        let confidence;
-        let recommendedAction;
-        let investigationStatus;
+let rootCauseType;
+let rootCause;
+let confidence;
+let investigationStatus;
 
-
-        // ------------------------------------------
-        // CASE A: NO MISMATCH
-        // ------------------------------------------
-
-        if (difference === 0) {
-
-            investigationStatus =
-                "NO_MISMATCH";
-
-            rootCauseType =
-                "NO_DISCREPANCY";
-
-            rootCause =
-                "Transaction amount and settlement amount match.";
-
-            confidence = 100;
-
-            recommendedAction =
-                "No corrective action required.";
-
-        }
+let confidenceStatus;
+let abstained;
+let abstainReason;
+let recommendationAllowed;
+let evidenceCoverage;
 
 
-        // ------------------------------------------
-        // CASE B: CONTRADICTION
-        // ------------------------------------------
-
-        else if (contradictionDetected) {
-
-            investigationStatus =
-                "CONTRADICTION_DETECTED";
-
-            rootCauseType =
-                "ADJUSTMENT_REQUIRES_REVIEW";
-
-            rootCause =
-                "Conflicting financial adjustment records were detected. A reliable root cause cannot be determined.";
-
-            confidence = 0;
-
-            recommendedAction =
-                "Do not automatically correct the settlement. Human investigation is required.";
-
-        }
 
 
-        // ------------------------------------------
-        // CASE C: FULLY EXPLAINED
-        // ------------------------------------------
+// ------------------------------------------
+// CALCULATE EVIDENCE COVERAGE
+// ------------------------------------------
 
-        else if (
-            unexplainedDifference === 0 &&
-            adjustments.length > 0
-        ) {
+if (difference === 0) {
 
-            investigationStatus =
-                "FULLY_EXPLAINED";
+    evidenceCoverage = 100;
 
-            const adjustmentTypes =
-                [
-                    ...new Set(
-                        adjustments.map(
-                            adjustment =>
-                                adjustment.adjustment_type
-                        )
-                    )
-                ];
+} else if (difference > 0) {
 
-            rootCauseType =
-                "FINANCIAL_ADJUSTMENT";
+    evidenceCoverage =
+        Math.min(
+            100,
+            Math.round(
+                (explainedDifference / difference) * 100
+            )
+        );
 
-            rootCause =
-                `The ₹${difference} settlement difference is fully explained by recorded financial adjustment(s): ${adjustmentTypes.join(", ")}.`;
+} else {
 
-            confidence = 98;
-
-            recommendedAction =
-                "Review the identified financial adjustment and proceed with correction only after human approval.";
-
-        }
+    evidenceCoverage = 0;
+}
 
 
-        // ------------------------------------------
-        // CASE D: PARTIALLY EXPLAINED
-        // ------------------------------------------
+// ------------------------------------------
+// CASE A: NO MISMATCH
+// ------------------------------------------
 
-        else if (
-            unexplainedDifference > 0 &&
-            adjustments.length > 0
-        ) {
+if (difference === 0) {
 
-            investigationStatus =
-                "PARTIALLY_EXPLAINED";
+    investigationStatus =
+        "NO_MISMATCH";
 
-            rootCauseType =
-                "INSUFFICIENT_EVIDENCE";
+    rootCauseType =
+        "NO_DISCREPANCY";
 
-            rootCause =
-                `Recorded financial adjustments explain ₹${explainedDifference}, but ₹${unexplainedDifference} remains unexplained.`;
+    rootCause =
+        "Transaction amount and settlement amount match.";
 
-            confidence = 50;
+    confidence =
+        100;
 
-            recommendedAction =
-                "Do not determine a final root cause. Additional evidence and human investigation are required.";
+    confidenceStatus =
+        "HIGH";
 
-        }
+    abstained =
+        false;
+
+    abstainReason =
+        null;
+
+    recommendationAllowed =
+        false;
+
+    
+
+}
 
 
-        // ------------------------------------------
-        // CASE E: NO ADJUSTMENT
-        // ------------------------------------------
+// ------------------------------------------
+// CASE B: CONTRADICTION
+// ------------------------------------------
 
-        else {
+else if (contradictionDetected) {
 
-            investigationStatus =
-                "UNEXPLAINED_MISMATCH";
+    investigationStatus =
+        "CONTRADICTION_DETECTED";
 
-            rootCauseType =
-                "UNKNOWN";
+    rootCauseType =
+        "ADJUSTMENT_REQUIRES_REVIEW";
 
-            rootCause =
-                `A ₹${difference} settlement mismatch was detected, but no financial adjustment evidence was found to explain it.`;
+    rootCause =
+        "Conflicting financial adjustment records were detected. A reliable root cause cannot be determined.";
 
-            confidence = 0;
+    confidence =
+        0;
 
-            recommendedAction =
-                "Investigate the transaction, settlement and related financial records before taking corrective action.";
+    confidenceStatus =
+        "ABSTAIN";
 
-        }
+    abstained =
+        true;
 
+    abstainReason =
+        "Conflicting financial evidence prevents reliable root-cause determination.";
+
+    recommendationAllowed =
+        false;
+
+    
+
+}
+
+
+// ------------------------------------------
+// CASE C: FULLY EXPLAINED
+// ------------------------------------------
+
+else if (
+    unexplainedDifference === 0 &&
+    adjustments.length > 0
+) {
+
+    investigationStatus =
+        "FULLY_EXPLAINED";
+
+    const adjustmentTypes =
+        [
+            ...new Set(
+                adjustments.map(
+                    adjustment =>
+                        adjustment.adjustment_type
+                )
+            )
+        ];
+
+    rootCauseType =
+        "FINANCIAL_ADJUSTMENT";
+
+    rootCause =
+        `The ₹${difference} settlement difference is fully explained by recorded financial adjustment(s): ${adjustmentTypes.join(", ")}.`;
+
+    /*
+     * High confidence requires:
+     *
+     * 1. Difference exists
+     * 2. Evidence exists
+     * 3. Evidence completely explains difference
+     * 4. No contradiction
+     */
+
+    confidence =
+        evidenceCoverage === 100 &&
+        !contradictionDetected
+            ? 98
+            : 90;
+
+    confidenceStatus =
+        confidence >= 95
+            ? "HIGH"
+            : "MEDIUM";
+
+    abstained =
+        false;
+
+    abstainReason =
+        null;
+
+    recommendationAllowed =
+        confidence >= 95;
+
+    
+
+}
+
+
+// ------------------------------------------
+// CASE D: PARTIALLY EXPLAINED
+// ------------------------------------------
+
+else if (
+    unexplainedDifference > 0 &&
+    adjustments.length > 0
+) {
+
+    investigationStatus =
+        "PARTIALLY_EXPLAINED";
+
+    rootCauseType =
+        "INSUFFICIENT_EVIDENCE";
+
+    rootCause =
+        `Recorded financial adjustments explain ₹${explainedDifference}, but ₹${unexplainedDifference} remains unexplained.`;
+
+    /*
+     * Partial evidence is not enough to
+     * establish a reliable root cause.
+     */
+
+    confidence =
+        evidenceCoverage;
+
+    confidenceStatus =
+        confidence >= 80
+            ? "MEDIUM"
+            : "LOW";
+
+    abstained =
+        true;
+
+    abstainReason =
+        "Evidence explains only part of the financial difference.";
+
+    recommendationAllowed =
+        false;
+
+    
+
+}
+
+
+// ------------------------------------------
+// CASE E: NO SUPPORTING EVIDENCE
+// ------------------------------------------
+
+else {
+
+    investigationStatus =
+        "UNEXPLAINED_MISMATCH";
+
+    rootCauseType =
+        "UNKNOWN";
+
+    rootCause =
+        `A ₹${difference} settlement mismatch was detected, but no financial adjustment evidence was found to explain it.`;
+
+    confidence =
+        0;
+
+    confidenceStatus =
+        "ABSTAIN";
+
+    abstained =
+        true;
+
+    abstainReason =
+        "No supporting financial evidence was found to determine the root cause.";
+
+    recommendationAllowed =
+        false;
+}
+
+    // ==========================================
+// ==========================================
+// 9. RECOMMENDATION ENGINE
+// ==========================================
+
+let recommendationType;
+let proposedAction;
+let recommendationReason;
+let recommendationPriority;
+let requiresHumanApproval;
+let allowedToExecute;
+let blockedReason;
+
+
+// ------------------------------------------
+// CASE A: NO MISMATCH
+// ------------------------------------------
+
+if (investigationStatus === "NO_MISMATCH") {
+
+    recommendationType =
+        "NO_ACTION";
+
+    proposedAction =
+        "No corrective action required.";
+
+    recommendationReason =
+        "Transaction and settlement amounts match.";
+
+    recommendationPriority =
+        "LOW";
+
+    requiresHumanApproval =
+        false;
+
+    allowedToExecute =
+        false;
+
+    blockedReason =
+        "No financial discrepancy exists.";
+
+}
+
+
+// ------------------------------------------
+// CASE B: CONTRADICTION
+// ------------------------------------------
+
+else if (
+    investigationStatus ===
+    "CONTRADICTION_DETECTED"
+) {
+
+    recommendationType =
+        "HUMAN_INVESTIGATION";
+
+    proposedAction =
+        "Investigate the conflicting financial records before taking corrective action.";
+
+    recommendationReason =
+        "Conflicting financial evidence prevents reliable root-cause determination.";
+
+    recommendationPriority =
+        "HIGH";
+
+    requiresHumanApproval =
+        true;
+
+    allowedToExecute =
+        false;
+
+    blockedReason =
+        "Recommendation blocked because the investigation engine abstained due to contradictory evidence.";
+
+}
+
+
+// ------------------------------------------
+// CASE C: FULLY EXPLAINED
+// ------------------------------------------
+
+else if (
+    investigationStatus ===
+        "FULLY_EXPLAINED" &&
+    confidenceStatus ===
+        "HIGH" &&
+    !abstained &&
+    recommendationAllowed
+) {
+
+    recommendationType =
+        "REVIEW_FINANCIAL_ADJUSTMENT";
+
+    proposedAction =
+        "Review the identified financial adjustment and proceed with the appropriate corrective action after human approval.";
+
+    recommendationReason =
+        rootCause;
+
+    recommendationPriority =
+        "MEDIUM";
+
+    requiresHumanApproval =
+        true;
+
+    allowedToExecute =
+        true;
+
+    blockedReason =
+        null;
+
+}
+
+
+// ------------------------------------------
+// CASE D: PARTIALLY EXPLAINED
+// ------------------------------------------
+
+else if (
+    investigationStatus ===
+    "PARTIALLY_EXPLAINED"
+) {
+
+    recommendationType =
+        "ADDITIONAL_INVESTIGATION";
+
+    proposedAction =
+        "Collect additional financial evidence before taking corrective action.";
+
+    recommendationReason =
+        `Only ₹${explainedDifference} of the ₹${difference} difference is explained.`;
+
+    recommendationPriority =
+        "HIGH";
+
+    requiresHumanApproval =
+        true;
+
+    allowedToExecute =
+        false;
+
+    blockedReason =
+        "Insufficient evidence to establish a reliable root cause.";
+
+}
+
+
+// ------------------------------------------
+// CASE E: UNEXPLAINED MISMATCH
+// ------------------------------------------
+
+else if (
+    investigationStatus ===
+    "UNEXPLAINED_MISMATCH"
+) {
+
+    recommendationType =
+        "INVESTIGATE_MISMATCH";
+
+    proposedAction =
+        "Investigate the transaction, settlement and related financial records.";
+
+    recommendationReason =
+        rootCause;
+
+    recommendationPriority =
+        "HIGH";
+
+    requiresHumanApproval =
+        true;
+
+    allowedToExecute =
+        false;
+
+    blockedReason =
+        "No supporting financial evidence was found.";
+
+}
+
+
+// ------------------------------------------
+// SAFETY FALLBACK
+// ------------------------------------------
+
+else {
+
+    recommendationType =
+        "HUMAN_REVIEW";
+
+    proposedAction =
+        "Human review is required before taking any financial action.";
+
+    recommendationReason =
+        "The recommendation engine could not establish a safe recommendation.";
+
+    recommendationPriority =
+        "HIGH";
+
+    requiresHumanApproval =
+        true;
+
+    allowedToExecute =
+        false;
+
+    blockedReason =
+        "Unknown investigation state.";
+
+}
 
         // ==========================================
         // 9. RETURN INVESTIGATION + ROOT CAUSE
@@ -1729,10 +2909,51 @@ app.get("/investigate/:transaction_id", async (req, res) => {
             root_cause:
                 rootCause,
 
+            
+
             confidence,
 
-            explained_difference:
-                explainedDifference,
+confidence_status:
+    confidenceStatus,
+
+evidence_coverage:
+    evidenceCoverage,
+
+abstained,
+
+abstain_reason:
+    abstainReason,
+
+recommendation: {
+
+    type:
+        recommendationType,
+
+    proposed_action:
+        proposedAction,
+
+    reason:
+        recommendationReason,
+
+    priority:
+        recommendationPriority,
+
+    requires_human_approval:
+        requiresHumanApproval,
+
+    allowed_to_execute:
+        allowedToExecute,
+
+    blocked_reason:
+        blockedReason
+
+},
+
+recommendation_allowed:
+    recommendationAllowed,
+
+explained_difference:
+    explainedDifference,
 
             unexplained_difference:
                 unexplainedDifference,
@@ -1740,8 +2961,75 @@ app.get("/investigate/:transaction_id", async (req, res) => {
             contradiction_detected:
                 contradictionDetected,
 
-            recommended_action:
-                recommendedAction,
+            
+
+            explanation: {
+                summary:
+                    rootCause,
+
+    transaction_amount:
+        transactionAmount,
+
+    settlement_amount:
+        settlementAmount,
+
+    detected_difference:
+        difference,
+
+    explained_difference:
+        explainedDifference,
+
+    unexplained_difference:
+        unexplainedDifference,
+
+    evidence_count:
+        adjustments.length,
+
+    evidence: adjustments.map(
+        adjustment => ({
+            type:
+                adjustment.adjustment_type,
+
+            amount:
+                adjustment.amount,
+
+            reason:
+                adjustment.reason
+        })
+    ),
+
+    contradiction_detected:
+        contradictionDetected,
+
+    evidence_sufficient:
+    recommendationAllowed,
+
+confidence:
+    confidence,
+
+confidence_status:
+    confidenceStatus,
+
+evidence_coverage:
+    evidenceCoverage,
+
+abstained,
+
+abstain_reason:
+    abstainReason,
+
+recommendation_allowed:
+    recommendationAllowed,
+
+explained_difference:
+    explainedDifference,
+
+unexplained_difference:
+    unexplainedDifference,
+
+contradiction_detected:
+    contradictionDetected,
+},  
 
             human_approval_required:
                 difference !== 0,
@@ -1767,7 +3055,52 @@ app.get("/investigate/:transaction_id", async (req, res) => {
 
     }
 });
+// ==================================================
+// GET AUDIT LOGS — STEP 56
+// ==================================================
 
+app.get("/audit-logs", async (req, res) => {
+
+    try {
+
+        const result = await pool.query(
+            `
+            SELECT
+                id,
+                case_id,
+                action_id,
+                event_type,
+                actor,
+                description,
+                old_status,
+                new_status,
+                metadata,
+                created_at
+            FROM audit_logs
+            ORDER BY created_at DESC
+            `
+        );
+
+        res.json({
+            total_logs: result.rows.length,
+            audit_logs: result.rows
+        });
+
+    } catch (error) {
+
+        console.error(
+            "Audit log fetch error:",
+            error
+        );
+
+        res.status(500).json({
+            message: "Could not fetch audit logs",
+            error: error.message
+        });
+
+    }
+
+});
 
 // ==================================================
 // START SERVER
