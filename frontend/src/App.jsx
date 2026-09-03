@@ -5,10 +5,13 @@ function App() {
   const [reconciliation, setReconciliation] = useState([]);
   const [cases, setCases] = useState([]);
   const [approvalActions, setApprovalActions] = useState([]);
+  const [paymentFailures, setPaymentFailures] = useState([]);
+  const [auditLogs, setAuditLogs] = useState([]);
   const [investigation, setInvestigation] = useState(null);
   const [caseHistory, setCaseHistory] = useState(null);
   const [paymentHealth, setPaymentHealth] = useState(null);
   const [riskPrioritization, setRiskPrioritization] = useState([]);
+  
 
   // ==========================================
   // APPROVE / REJECT ACTION
@@ -83,35 +86,40 @@ function App() {
     }
   };
 
-  // ==========================================
-  // VERIFY ACTION
-  // ==========================================
-
   const handleVerification = async (actionId, caseId) => {
-    try {
-      // Verify the action
-      const response = await fetch(
-        `http://localhost:5000/approval-actions/${actionId}/verify`,
-        {
-          method: "POST",
-        }
-      );
+  try {
+    // ==========================================
+    // VERIFY ACTION
+    // ==========================================
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        alert(data.message);
-        return;
+    const response = await fetch(
+      `http://localhost:5000/approval-actions/${actionId}/verify`,
+      {
+        method: "POST",
       }
+    );
 
-      // Update verification status
-      setApprovalActions((currentActions) =>
-        currentActions.map((action) =>
-          action.id === actionId ? data.action : action
-        )
-      );
+    const data = await response.json();
 
-      // Resolve related case
+    if (!response.ok) {
+      alert(data.message);
+      return;
+    }
+
+    // Update action
+    setApprovalActions((currentActions) =>
+      currentActions.map((action) =>
+        action.id === actionId
+          ? data.action
+          : action
+      )
+    );
+
+    // ==========================================
+    // SETTLEMENT CASE
+    // ==========================================
+
+    if (caseId) {
       const caseResponse = await fetch(
         `http://localhost:5000/cases/${caseId}/resolve`,
         {
@@ -126,25 +134,42 @@ function App() {
         return;
       }
 
-      // Update case on dashboard
       setCases((currentCases) =>
         currentCases.map((item) =>
-          item.id === caseId ? updatedCase : item
+          item.id === caseId
+            ? updatedCase
+            : item
         )
       );
 
-      alert("Action verified and case resolved successfully!");
+      alert(
+        "Action verified and settlement case resolved successfully!"
+      );
 
-    } catch (error) {
-      console.error("Verification error:", error);
-      alert("Could not verify action.");
+      return;
     }
-  };
 
-  // ==========================================
-  // LOAD DATA FROM BACKEND
-  // ==========================================
-// ==========================================
+    // ==========================================
+    // PAYMENT FAILURE CASE
+    // ==========================================
+
+    alert(
+      "Payment failure recovery action verified successfully!"
+    );
+
+  } catch (error) {
+    console.error(
+      "Verification error:",
+      error
+    );
+
+    alert(
+      "Could not verify action."
+    );
+  }
+};
+    // Refresh audit logs
+    
 // ==========================================
 // LOAD CASE HISTORY
 // ==========================================
@@ -238,6 +263,31 @@ fetch("http://localhost:5000/risk-prioritization")
   .then((data) => setRiskPrioritization(data))
   .catch((error) =>
     console.error("Risk prioritization error:", error)
+  );
+  // Payment Failure Intelligence
+fetch("http://localhost:5000/payment-failures")
+  .then((response) => response.json())
+  .then((data) =>
+    setPaymentFailures(data.payment_failures || [])
+  )
+  .catch((error) =>
+    console.error(
+      "Payment failures error:",
+      error
+    )
+  );
+
+// Audit Logs
+fetch("http://localhost:5000/audit-logs")
+  .then((response) => response.json())
+  .then((data) =>
+    setAuditLogs(data.audit_logs || [])
+  )
+  .catch((error) =>
+    console.error(
+      "Audit logs error:",
+      error
+    )
   );
       
   }, []);
@@ -704,8 +754,83 @@ fetch("http://localhost:5000/risk-prioritization")
   <p>Select a case and click 📜 History.</p>
 
 )}
+{/* ======================================
+    PAYMENT FAILURE INTELLIGENCE
+====================================== */}
 
-      <h2>🤖 AI Recommendations</h2>
+<hr />
+
+<h2>💳 Payment Failure Intelligence</h2>
+
+{paymentFailures.length === 0 ? (
+
+  <p>
+    No failed payments detected.
+  </p>
+
+) : (
+
+  <table border="1" cellPadding="10">
+
+    <thead>
+
+      <tr>
+        <th>Payment ID</th>
+        <th>Order ID</th>
+        <th>Amount</th>
+        <th>Failure Reason</th>
+        <th>Risk</th>
+        <th>AI Recommendation</th>
+        <th>Proposed Action</th>
+      </tr>
+
+    </thead>
+
+    <tbody>
+
+      {paymentFailures.map((payment) => (
+
+        <tr key={payment.payment_id}>
+
+          <td>
+            {payment.payment_id}
+          </td>
+
+          <td>
+            {payment.order_id}
+          </td>
+
+          <td>
+            ₹{payment.amount}
+          </td>
+
+          <td>
+            {payment.failure_reason}
+          </td>
+
+          <td>
+            {payment.risk_level}
+          </td>
+
+          <td>
+            {payment.analysis?.recommendation?.type}
+          </td>
+
+          <td>
+            {payment.analysis?.recommendation?.proposed_action}
+          </td>
+
+        </tr>
+
+      ))}
+
+    </tbody>
+
+  </table>
+
+)}
+
+   <h2>🤖 AI Recommendations</h2>
 
       {approvalActions.length === 0 ? (
 
@@ -722,8 +847,13 @@ fetch("http://localhost:5000/risk-prioritization")
             </h3>
 
             <p>
-              <strong>Case ID:</strong>{" "}
-              {action.case_id}
+              <strong>Settlement Case:</strong>{" "}
+              {action.case_id || "N/A"}
+            </p>
+
+            <p>
+              <strong>Payment Failure Case:</strong>{" "}
+              {action.payment_failure_case_id || "N/A"}
             </p>
 
             <p>
@@ -750,6 +880,7 @@ fetch("http://localhost:5000/risk-prioritization")
               <strong>Verification Status:</strong>{" "}
               {action.verification_status}
             </p>
+
 
             {/* ==============================
                 APPROVE / REJECT
@@ -787,6 +918,7 @@ fetch("http://localhost:5000/risk-prioritization")
 
             )}
 
+
             {/* ==============================
                 VERIFY
             ============================== */}
@@ -816,8 +948,89 @@ fetch("http://localhost:5000/risk-prioritization")
 
       )}
 
+
+      {/* ======================================
+          AUDIT TRAIL
+      ====================================== */}
+
+      <h2>📜 PayTruth Audit Trail</h2>
+
+      {auditLogs.length === 0 ? (
+
+        <p>
+          No audit events available.
+        </p>
+
+      ) : (
+
+        <table border="1" cellPadding="10">
+
+          <thead>
+
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Actor</th>
+              <th>Case ID</th>
+              <th>Action ID</th>
+              <th>Description</th>
+              <th>Status Change</th>
+            </tr>
+
+          </thead>
+
+          <tbody>
+
+            {auditLogs.map((log) => (
+
+              <tr key={log.id}>
+
+                <td>
+                  {new Date(
+                    log.created_at
+                  ).toLocaleString()}
+                </td>
+
+                <td>
+                  {log.event_type}
+                </td>
+
+                <td>
+                  {log.actor}
+                </td>
+
+                <td>
+                  {log.case_id || "N/A"}
+                </td>
+
+                <td>
+                  {log.action_id || "N/A"}
+                </td>
+
+                <td>
+                  {log.description}
+                </td>
+
+                <td>
+                  {log.old_status || "-"}
+                  {" → "}
+                  {log.new_status || "-"}
+                </td>
+
+              </tr>
+
+            ))}
+
+          </tbody>
+
+        </table>
+
+      )}
+
+      <hr />
+
     </div>
   );
 }
 
-export default App;
+export default App;   

@@ -506,6 +506,7 @@ app.get("/approval-actions", async (req, res) => {
 
                 id,
                 case_id,
+                payment_failure_case_id,
                 action_type,
                 ai_reason,
                 proposed_action,
@@ -539,21 +540,25 @@ app.get("/approval-actions", async (req, res) => {
 // ==================================================
 // CREATE APPROVAL ACTION
 // ==================================================
-
 app.post("/approval-actions/create", async (req, res) => {
 
     try {
 
         const {
             case_id,
+            payment_failure_case_id,
+            fraud_case_id,
             action_type,
             ai_reason,
             proposed_action
-        } = req.body;
+        } = req.body || {};
 
+
+        // ==========================================
+        // 1. VALIDATE REQUEST
+        // ==========================================
 
         if (
-            !case_id ||
             !action_type ||
             !ai_reason ||
             !proposed_action
@@ -562,72 +567,221 @@ app.post("/approval-actions/create", async (req, res) => {
             return res.status(400).json({
 
                 message:
-                    "case_id, action_type, ai_reason and proposed_action are required"
+                    "action_type, ai_reason and proposed_action are required"
 
             });
         }
 
 
-        // Check mismatch case
+        // Count how many case types were provided
 
-        const caseResult = await pool.query(
-            `
-            SELECT *
-
-            FROM mismatch_cases
-
-            WHERE id = $1
-            `,
-            [case_id]
-        );
+        const caseReferenceCount =
+            [case_id, payment_failure_case_id, fraud_case_id]
+                .filter(value => value !== undefined && value !== null)
+                .length;
 
 
-        if (caseResult.rows.length === 0) {
+        if (caseReferenceCount === 0) {
 
-            return res.status(404).json({
-                message:
-                    "Mismatch case not found"
-            });
-        }
-
-
-        // Prevent duplicate pending approval
-
-        const existingResult = await pool.query(
-            `
-            SELECT *
-
-            FROM approval_actions
-
-            WHERE case_id = $1
-
-            AND approval_status = 'PENDING'
-            `,
-            [case_id]
-        );
-
-
-        if (existingResult.rows.length > 0) {
-
-            return res.status(409).json({
+            return res.status(400).json({
 
                 message:
-                    "A pending approval already exists for this case.",
-
-                action:
-                    existingResult.rows[0]
+                    "Either case_id, payment_failure_case_id or fraud_case_id is required"
 
             });
         }
 
 
-        // Create approval request
+        if (caseReferenceCount > 1) {
+
+            return res.status(400).json({
+
+                message:
+                    "Provide only one of case_id, payment_failure_case_id or fraud_case_id"
+
+            });
+        }
+
+
+        // ==========================================
+        // 2. SETTLEMENT CASE APPROVAL
+        // ==========================================
+
+        if (case_id) {
+
+            const caseResult = await pool.query(
+                `
+                SELECT *
+                FROM mismatch_cases
+                WHERE id = $1
+                `,
+                [case_id]
+            );
+
+
+            if (caseResult.rows.length === 0) {
+
+                return res.status(404).json({
+
+                    message:
+                        "Mismatch case not found"
+
+                });
+
+            }
+
+
+            const existingResult = await pool.query(
+                `
+                SELECT *
+                FROM approval_actions
+                WHERE case_id = $1
+                AND approval_status = 'PENDING'
+                `,
+                [case_id]
+            );
+
+
+            if (existingResult.rows.length > 0) {
+
+                return res.status(409).json({
+
+                    message:
+                        "A pending approval already exists for this case.",
+
+                    action:
+                        existingResult.rows[0]
+
+                });
+
+            }
+
+        }
+
+
+        // ==========================================
+        // 3. PAYMENT FAILURE CASE APPROVAL
+        // ==========================================
+
+        if (payment_failure_case_id) {
+
+            const failureCaseResult = await pool.query(
+                `
+                SELECT *
+                FROM payment_failure_cases
+                WHERE id = $1
+                `,
+                [payment_failure_case_id]
+            );
+
+
+            if (failureCaseResult.rows.length === 0) {
+
+                return res.status(404).json({
+
+                    message:
+                        "Payment failure case not found"
+
+                });
+
+            }
+
+
+            const existingResult = await pool.query(
+                `
+                SELECT *
+                FROM approval_actions
+                WHERE payment_failure_case_id = $1
+                AND approval_status = 'PENDING'
+                `,
+                [payment_failure_case_id]
+            );
+
+
+            if (existingResult.rows.length > 0) {
+
+                return res.status(409).json({
+
+                    message:
+                        "A pending approval already exists for this payment failure case.",
+
+                    action:
+                        existingResult.rows[0]
+
+                });
+
+            }
+
+        }
+
+
+        // ==========================================
+        // 4. FRAUD CASE APPROVAL
+        // ==========================================
+
+        if (fraud_case_id) {
+
+            const fraudCaseResult = await pool.query(
+                `
+                SELECT *
+                FROM fraud_cases
+                WHERE id = $1
+                `,
+                [fraud_case_id]
+            );
+
+
+            if (fraudCaseResult.rows.length === 0) {
+
+                return res.status(404).json({
+
+                    message:
+                        "Fraud case not found"
+
+                });
+
+            }
+
+
+            const existingResult = await pool.query(
+                `
+                SELECT *
+                FROM approval_actions
+                WHERE fraud_case_id = $1
+                AND approval_status = 'PENDING'
+                `,
+                [fraud_case_id]
+            );
+
+
+            if (existingResult.rows.length > 0) {
+
+                return res.status(409).json({
+
+                    message:
+                        "A pending approval already exists for this fraud case.",
+
+                    action:
+                        existingResult.rows[0]
+
+                });
+
+            }
+
+        }
+
+
+        // ==========================================
+        // 5. CREATE APPROVAL REQUEST
+        // ==========================================
 
         const result = await pool.query(
             `
             INSERT INTO approval_actions
             (
                 case_id,
+                payment_failure_case_id,
+                fraud_case_id,
                 action_type,
                 ai_reason,
                 proposed_action,
@@ -642,6 +796,8 @@ app.post("/approval-actions/create", async (req, res) => {
                 $2,
                 $3,
                 $4,
+                $5,
+                $6,
                 'PENDING',
                 'NOT_EXECUTED',
                 'NOT_VERIFIED'
@@ -650,13 +806,19 @@ app.post("/approval-actions/create", async (req, res) => {
             RETURNING *
             `,
             [
-                case_id,
+                case_id || null,
+                payment_failure_case_id || null,
+                fraud_case_id || null,
                 action_type,
                 ai_reason,
                 proposed_action
             ]
         );
 
+
+        // ==========================================
+        // 6. RESPONSE
+        // ==========================================
 
         res.status(201).json({
 
@@ -686,29 +848,37 @@ app.post("/approval-actions/create", async (req, res) => {
                 error.message
 
         });
+
     }
+
 });
 
-
-// ==================================================
-// CONTROLLED EXECUTION
-// ==================================================
-
 app.post("/approval-actions/:id/execute", async (req, res) => {
+
     const client = await pool.connect();
 
     try {
+
         const { id } = req.params;
 
-        // Start a database transaction
+        // ==========================================
+        // 1. START DATABASE TRANSACTION
+        // ==========================================
+
         await client.query("BEGIN");
 
-        // 1. Get the approved action
+
+        // ==========================================
+        // 2. GET APPROVED ACTION
+        // ==========================================
+
         const actionResult = await client.query(
             `
             SELECT
                 id,
                 case_id,
+                payment_failure_case_id,
+                fraud_case_id,
                 action_type,
                 approval_status,
                 execution_status
@@ -719,173 +889,15 @@ app.post("/approval-actions/:id/execute", async (req, res) => {
             [id]
         );
 
-        if (actionResult.rows.length === 0) {
-            await client.query("ROLLBACK");
-
-            return res.status(404).json({
-                message: "Approval action not found"
-            });
-        }
-
-        const action = actionResult.rows[0];
-
-        // 2. Safety check
-        if (
-            action.approval_status !== "APPROVED" ||
-            action.execution_status !== "NOT_EXECUTED"
-        ) {
-            await client.query("ROLLBACK");
-
-            return res.status(400).json({
-                message:
-                    "Action cannot be executed. It must be approved and not already executed."
-            });
-        }
-
-        // 3. Find the related mismatch case
-        const caseResult = await client.query(
-            `
-            SELECT
-                id,
-                transaction_id,
-                case_status
-            FROM mismatch_cases
-            WHERE id = $1
-            FOR UPDATE
-            `,
-            [action.case_id]
-        );
-
-        if (caseResult.rows.length === 0) {
-            await client.query("ROLLBACK");
-
-            return res.status(404).json({
-                message: "Related mismatch case not found"
-            });
-        }
-
-        const mismatchCase = caseResult.rows[0];
-
-        // 4. Move the case into investigation
-        const updatedCase = await client.query(
-            `
-            UPDATE mismatch_cases
-            SET case_status = 'INVESTIGATING'
-            WHERE id = $1
-            RETURNING *
-            `,
-            [mismatchCase.id]
-        );
-
-        // 5. Mark the approval action as executed
-        const updatedAction = await client.query(
-            `
-            UPDATE approval_actions
-            SET execution_status = 'EXECUTED'
-            WHERE id = $1
-            RETURNING *
-            `,
-            [id]
-        );
-
-        // 6. Commit both changes together
-        await client.query("COMMIT");
-        // ==========================================
-// AUDIT ACTION EXECUTION
-// ==========================================
-
-await createAuditLog({
-
-    caseId: action.case_id,
-
-    actionId: action.id,
-
-    eventType: "ACTION_EXECUTED",
-
-    actor: "SYSTEM",
-
-    description:
-        "Approved PayTruth action was executed in the controlled workflow.",
-
-    oldStatus:
-        "NOT_EXECUTED",
-
-    newStatus:
-        "EXECUTED",
-
-    metadata: {
-
-        action_type:
-            action.action_type,
-
-        execution_mode:
-            "SIMULATED / SANDBOX",
-
-        real_money_movement:
-            false
-
-    }
-
-});
-
-        res.json({
-            message: "Settlement investigation executed successfully",
-            action: updatedAction.rows[0],
-            case: updatedCase.rows[0]
-        });
-
-    } catch (error) {
-
-        await client.query("ROLLBACK");
-
-        console.error("Execution error:", error);
-
-        res.status(500).json({
-            message: "Could not execute action",
-            error: error.message
-        });
-
-    } finally {
-        client.release();
-    }
-});
-// ==================================================
-// INDEPENDENT VERIFICATION — STEP 54
-// ==================================================
-
-app.post("/approval-actions/:id/verify", async (req, res) => {
-
-    try {
-
-        const { id } = req.params;
-
-
-        // ==========================================
-        // 1. GET APPROVAL ACTION
-        // ==========================================
-
-        const actionResult = await pool.query(
-            `
-            SELECT
-                id,
-                case_id,
-                action_type,
-                approval_status,
-                execution_status,
-                verification_status
-            FROM approval_actions
-            WHERE id = $1
-            `,
-            [id]
-        );
-
 
         if (actionResult.rows.length === 0) {
+
+            await client.query("ROLLBACK");
 
             return res.status(404).json({
 
                 message:
-                    "Approval action not found."
+                    "Approval action not found"
 
             });
 
@@ -897,19 +909,617 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
 
 
         // ==========================================
-        // 2. APPROVAL SAFETY CHECK
+        // 3. SAFETY CHECK
         // ==========================================
 
         if (
-            action.approval_status !==
-            "APPROVED"
+            action.approval_status !== "APPROVED" ||
+            action.execution_status !== "NOT_EXECUTED"
         ) {
+
+            await client.query("ROLLBACK");
 
             return res.status(400).json({
 
                 message:
-                    "Action must be approved before verification."
+                    "Action cannot be executed. It must be approved and not already executed."
 
+            });
+
+        }
+
+
+        // ==========================================
+        // 4A. SETTLEMENT CASE
+        // ==========================================
+
+        if (action.case_id) {
+
+            const caseResult = await client.query(
+                `
+                SELECT
+                    id,
+                    transaction_id,
+                    case_status
+                FROM mismatch_cases
+                WHERE id = $1
+                FOR UPDATE
+                `,
+                [action.case_id]
+            );
+
+
+            if (caseResult.rows.length === 0) {
+
+                await client.query("ROLLBACK");
+
+                return res.status(404).json({
+
+                    message:
+                        "Related mismatch case not found"
+
+                });
+
+            }
+
+
+            const mismatchCase =
+                caseResult.rows[0];
+
+
+            // Move settlement case into investigation
+
+            const updatedCase =
+                await client.query(
+                    `
+                    UPDATE mismatch_cases
+                    SET case_status = 'INVESTIGATING'
+                    WHERE id = $1
+                    RETURNING *
+                    `,
+                    [mismatchCase.id]
+                );
+
+
+            // Mark action as executed
+
+            const updatedAction =
+                await client.query(
+                    `
+                    UPDATE approval_actions
+                    SET execution_status = 'EXECUTED'
+                    WHERE id = $1
+                    RETURNING *
+                    `,
+                    [id]
+                );
+
+
+            await client.query("COMMIT");
+
+
+            // ==========================================
+            // AUDIT
+            // ==========================================
+
+            await createAuditLog({
+
+                caseId:
+                    action.case_id,
+
+                actionId:
+                    action.id,
+
+                eventType:
+                    "ACTION_EXECUTED",
+
+                actor:
+                    "SYSTEM",
+
+                description:
+                    "Approved PayTruth settlement action was executed in the controlled workflow.",
+
+                oldStatus:
+                    "NOT_EXECUTED",
+
+                newStatus:
+                    "EXECUTED",
+
+                metadata: {
+
+                    action_type:
+                        action.action_type,
+
+                    execution_mode:
+                        "SIMULATED / SANDBOX",
+
+                    real_money_movement:
+                        false
+
+                }
+
+            });
+
+
+            return res.json({
+
+                message:
+                    "Settlement investigation executed successfully",
+
+                action:
+                    updatedAction.rows[0],
+
+                case:
+                    updatedCase.rows[0]
+
+            });
+
+        }
+
+
+        // ==========================================
+        // 4B. PAYMENT FAILURE CASE
+        // ==========================================
+
+        if (action.payment_failure_case_id) {
+
+            const failureCaseResult =
+                await client.query(
+                    `
+                    SELECT
+                        id,
+                        payment_id,
+                        failure_reason,
+                        amount,
+                        risk_level,
+                        case_status,
+                        recommended_action
+                    FROM payment_failure_cases
+                    WHERE id = $1
+                    FOR UPDATE
+                    `,
+                    [action.payment_failure_case_id]
+                );
+
+
+            if (
+                failureCaseResult.rows.length === 0
+            ) {
+
+                await client.query("ROLLBACK");
+
+                return res.status(404).json({
+
+                    message:
+                        "Related payment failure case not found"
+
+                });
+
+            }
+
+
+            const failureCase =
+                failureCaseResult.rows[0];
+
+
+            // ==========================================
+            // CONTROLLED / SIMULATED EXECUTION
+            // ==========================================
+
+            const updatedFailureCase =
+                await client.query(
+                    `
+                    UPDATE payment_failure_cases
+
+                    SET case_status = 'INVESTIGATING'
+
+                    WHERE id = $1
+
+                    RETURNING *
+                    `,
+                    [failureCase.id]
+                );
+
+
+            // Mark approval action as executed
+
+            const updatedAction =
+                await client.query(
+                    `
+                    UPDATE approval_actions
+
+                    SET execution_status = 'EXECUTED'
+
+                    WHERE id = $1
+
+                    RETURNING *
+                    `,
+                    [id]
+                );
+
+
+            await client.query("COMMIT");
+
+
+            // ==========================================
+            // AUDIT PAYMENT FAILURE EXECUTION
+            // ==========================================
+
+            await createAuditLog({
+
+                caseId:
+                    null,
+
+                actionId:
+                    action.id,
+
+                eventType:
+                    "ACTION_EXECUTED",
+
+                actor:
+                    "SYSTEM",
+
+                description:
+                    "Approved payment failure recovery action was executed in the controlled workflow.",
+
+                oldStatus:
+                    "NOT_EXECUTED",
+
+                newStatus:
+                    "EXECUTED",
+
+                metadata: {
+
+                    payment_failure_case_id:
+                        action.payment_failure_case_id,
+                    payment_id:
+                        failureCase.payment_id,
+
+                    action_type:
+                        action.action_type,
+
+                    execution_mode:
+                        "SIMULATED / SANDBOX",
+
+                    real_money_movement:
+                        false
+
+                }
+
+            });
+
+
+            return res.json({
+
+                message:
+                    "Payment failure recovery action executed successfully",
+
+                action:
+                    updatedAction.rows[0],
+
+                payment_failure_case:
+                    updatedFailureCase.rows[0],
+
+                execution: {
+
+                    mode:
+                        "SIMULATED / SANDBOX",
+
+                    real_money_movement:
+                        false
+
+                }
+
+            });
+
+        }
+
+
+        // ==========================================
+        // 4C. FRAUD CASE
+        // ==========================================
+
+        if (action.fraud_case_id) {
+
+            const fraudCaseResult =
+                await client.query(
+                    `
+                    SELECT
+                        id,
+                        payment_id,
+                        order_id,
+                        amount,
+                        fraud_score,
+                        risk_level,
+                        recommended_action,
+                        case_status
+                    FROM fraud_cases
+                    WHERE id = $1
+                    FOR UPDATE
+                    `,
+                    [action.fraud_case_id]
+                );
+
+
+            if (
+                fraudCaseResult.rows.length === 0
+            ) {
+
+                await client.query("ROLLBACK");
+
+                return res.status(404).json({
+
+                    message:
+                        "Related fraud case not found"
+
+                });
+
+            }
+
+
+            const fraudCase =
+                fraudCaseResult.rows[0];
+
+
+            // ==========================================
+            // FRAUD SAFETY CHECK
+            // ==========================================
+
+            if (
+                fraudCase.case_status === "RESOLVED"
+            ) {
+
+                await client.query("ROLLBACK");
+
+                return res.status(400).json({
+
+                    message:
+                        "Fraud case is already resolved and cannot be executed again."
+
+                });
+
+            }
+
+
+            // ==========================================
+            // CONTROLLED FRAUD INVESTIGATION
+            // ==========================================
+
+            const updatedFraudCase =
+                await client.query(
+                    `
+                    UPDATE fraud_cases
+
+                    SET case_status = 'INVESTIGATING'
+
+                    WHERE id = $1
+
+                    RETURNING *
+                    `,
+                    [fraudCase.id]
+                );
+
+
+            // ==========================================
+            // MARK APPROVAL ACTION EXECUTED
+            // ==========================================
+
+            const updatedAction =
+                await client.query(
+                    `
+                    UPDATE approval_actions
+
+                    SET execution_status = 'EXECUTED'
+
+                    WHERE id = $1
+
+                    RETURNING *
+                    `,
+                    [id]
+                );
+
+
+            await client.query("COMMIT");
+
+
+            // ==========================================
+            // AUDIT FRAUD EXECUTION
+            // ==========================================
+
+            await createAuditLog({
+
+                caseId:
+                    null,
+
+                actionId:
+                    action.id,
+
+                eventType:
+                    "ACTION_EXECUTED",
+
+                actor:
+                    "SYSTEM",
+
+                description:
+                    "Approved fraud investigation was executed in the controlled workflow.",
+
+                oldStatus:
+                    "NOT_EXECUTED",
+
+                newStatus:
+                    "EXECUTED",
+
+                metadata: {
+
+                    fraud_case_id:
+                        action.fraud_case_id,
+
+                    payment_id:
+                        fraudCase.payment_id,
+
+                    order_id:
+                        fraudCase.order_id,
+
+                    fraud_score:
+                        fraudCase.fraud_score,
+
+                    risk_level:
+                        fraudCase.risk_level,
+
+                    action_type:
+                        action.action_type,
+
+                    execution_mode:
+                        "SIMULATED / SANDBOX",
+
+                    investigation_only:
+                        true,
+
+                    real_money_movement:
+                        false
+
+                }
+
+            });
+
+
+            return res.json({
+
+                message:
+                    "Fraud investigation executed successfully",
+
+                action:
+                    updatedAction.rows[0],
+
+                fraud_case:
+                    updatedFraudCase.rows[0],
+
+                execution: {
+
+                    mode:
+                        "SIMULATED / SANDBOX",
+
+                    investigation_only:
+                        true,
+
+                    real_money_movement:
+                        false
+
+                }
+
+            });
+
+        }
+
+
+        // ==========================================
+        // 5. INVALID ACTION REFERENCE
+        // ==========================================
+
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+
+            message:
+                "Action is not linked to a valid settlement case, payment failure case, or fraud case."
+
+        });
+
+
+    } catch (error) {
+
+        try {
+
+            await client.query("ROLLBACK");
+
+        } catch (rollbackError) {
+
+            console.error(
+                "Rollback error:",
+                rollbackError
+            );
+
+        }
+
+
+        console.error(
+            "Execution error:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            message:
+                "Could not execute action",
+
+            error:
+                error.message
+
+        });
+
+
+    } finally {
+
+        client.release();
+
+    }
+
+});
+
+
+
+// ==================================================
+// INDEPENDENT VERIFICATION — STEP 54
+// ==================================================
+
+app.post("/approval-actions/:id/verify", async (req, res) => {
+
+    try {
+
+        const { id } = req.params;
+
+        // ==========================================
+        // 1. GET APPROVAL ACTION
+        // ==========================================
+
+        const actionResult = await pool.query(
+            `
+            SELECT
+                id,
+                case_id,
+                payment_failure_case_id,
+                fraud_case_id,
+                action_type,
+                approval_status,
+                execution_status,
+                verification_status
+            FROM approval_actions
+            WHERE id = $1
+            `,
+            [id]
+        );
+
+        if (actionResult.rows.length === 0) {
+
+            return res.status(404).json({
+                message: "Approval action not found."
+            });
+
+        }
+
+        const action = actionResult.rows[0];
+
+
+        // ==========================================
+        // 2. APPROVAL SAFETY CHECK
+        // ==========================================
+
+        if (action.approval_status !== "APPROVED") {
+
+            return res.status(400).json({
+                message:
+                    "Action must be approved before verification."
             });
 
         }
@@ -919,16 +1529,11 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
         // 3. EXECUTION SAFETY CHECK
         // ==========================================
 
-        if (
-            action.execution_status !==
-            "EXECUTED"
-        ) {
+        if (action.execution_status !== "EXECUTED") {
 
             return res.status(400).json({
-
                 message:
                     "Action must be executed before verification."
-
             });
 
         }
@@ -938,24 +1543,708 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
         // 4. PREVENT DUPLICATE VERIFICATION
         // ==========================================
 
-        if (
-            action.verification_status ===
-            "VERIFIED"
-        ) {
+        if (action.verification_status === "VERIFIED") {
 
             return res.status(400).json({
-
                 message:
                     "Action has already been verified."
+            });
+
+        }
+
+
+        // ==================================================
+        // 5. FRAUD CASE VERIFICATION
+        // ==================================================
+
+        if (action.fraud_case_id) {
+
+            const fraudCaseResult =
+                await pool.query(
+                    `
+                    SELECT
+                        id,
+                        payment_id,
+                        order_id,
+                        amount,
+                        fraud_score,
+                        risk_level,
+                        recommended_action,
+                        case_status,
+                        signals,
+                        ai_reason
+                    FROM fraud_cases
+                    WHERE id = $1
+                    `,
+                    [action.fraud_case_id]
+                );
+
+
+            if (fraudCaseResult.rows.length === 0) {
+
+                return res.status(404).json({
+
+                    message:
+                        "Related fraud case not found."
+
+                });
+
+            }
+
+
+            const fraudCase =
+                fraudCaseResult.rows[0];
+
+
+            // ==========================================
+            // FRAUD CASE MUST BE UNDER INVESTIGATION
+            // ==========================================
+
+            if (
+                fraudCase.case_status !==
+                "INVESTIGATING"
+            ) {
+
+                return res.status(409).json({
+
+                    message:
+                        "Fraud verification failed. Fraud case is not in INVESTIGATING state.",
+
+                    verification: {
+
+                        result:
+                            "NOT_VERIFIED",
+
+                        fraud_case_id:
+                            fraudCase.id,
+
+                        case_status:
+                            fraudCase.case_status
+
+                    },
+
+                    safety:
+                        "Fraud case must remain unverified until controlled execution places it under investigation."
+
+                });
+
+            }
+
+
+            // ==========================================
+            // GET ACTUAL PAYMENT RECORD
+            // ==========================================
+
+            const paymentResult =
+                await pool.query(
+                    `
+                    SELECT
+                        payment_id,
+                        order_id,
+                        amount,
+                        payment_status,
+                        failure_reason,
+                        created_at
+                    FROM payments
+                    WHERE payment_id = $1
+                    `,
+                    [fraudCase.payment_id]
+                );
+
+
+            if (paymentResult.rows.length === 0) {
+
+                return res.status(409).json({
+
+                    message:
+                        "Verification failed. Payment record not found.",
+
+                    safety:
+                        "Fraud investigation must not be marked verified without a valid underlying payment record."
+
+                });
+
+            }
+
+
+            const payment =
+                paymentResult.rows[0];
+
+
+            // ==========================================
+            // VERIFY PAYMENT RECORD AGAINST FRAUD CASE
+            // ==========================================
+
+            const paymentAmount =
+                Number(payment.amount);
+
+            const caseAmount =
+                Number(fraudCase.amount);
+
+
+            const paymentRecordMatchesCase =
+                payment.payment_id ===
+                    fraudCase.payment_id &&
+
+                payment.order_id ===
+                    fraudCase.order_id &&
+
+                paymentAmount ===
+                    caseAmount;
+
+
+            // ==========================================
+            // VERIFY FRAUD INVESTIGATION ACTION
+            // ==========================================
+
+            const investigationActionRecorded =
+                action.action_type ===
+                    "FRAUD_INVESTIGATION" &&
+
+                action.execution_status ===
+                    "EXECUTED";
+
+
+            // ==========================================
+            // SAFETY DECISION
+            // ==========================================
+
+            if (
+                !paymentRecordMatchesCase ||
+                !investigationActionRecorded
+            ) {
+
+                return res.status(409).json({
+
+                    message:
+                        "Independent fraud verification failed. The fraud case, payment record, or investigation action does not match.",
+
+                    verification: {
+
+                        result:
+                            "NOT_VERIFIED",
+
+                        fraud_case_id:
+                            fraudCase.id,
+
+                        payment_id:
+                            payment.payment_id,
+
+                        order_id:
+                            payment.order_id,
+
+                        payment_amount:
+                            paymentAmount,
+
+                        case_amount:
+                            caseAmount,
+
+                        payment_record_matches_case:
+                            paymentRecordMatchesCase,
+
+                        investigation_action_recorded:
+                            investigationActionRecorded
+
+                    },
+
+                    safety:
+                        "Fraud case must not be marked verified until the underlying records and approved investigation action match."
+
+                });
+
+            }
+
+
+            // ==========================================
+            // MARK ACTION VERIFIED
+            // ==========================================
+
+            const verificationUpdate =
+                await pool.query(
+                    `
+                    UPDATE approval_actions
+
+                    SET
+                        verification_status =
+                            'VERIFIED'
+
+                    WHERE id = $1
+
+                    AND approval_status =
+                        'APPROVED'
+
+                    AND execution_status =
+                        'EXECUTED'
+
+                    AND verification_status =
+                        'NOT_VERIFIED'
+
+                    RETURNING *
+                    `,
+                    [id]
+                );
+
+
+            if (verificationUpdate.rows.length === 0) {
+
+                return res.status(400).json({
+
+                    message:
+                        "Action could not be marked as verified."
+
+                });
+
+            }
+
+
+            // ==========================================
+            // AUDIT FRAUD VERIFICATION
+            // ==========================================
+
+            await createAuditLog({
+
+                caseId:
+                    null,
+
+                actionId:
+                    action.id,
+
+                eventType:
+                    "ACTION_VERIFIED",
+
+                actor:
+                    "SYSTEM",
+
+                description:
+                    "PayTruth independently verified the fraud investigation workflow against the underlying payment record.",
+
+                oldStatus:
+                    "NOT_VERIFIED",
+
+                newStatus:
+                    "VERIFIED",
+
+                metadata: {
+
+                    fraud_case_id:
+                        fraudCase.id,
+
+                    payment_id:
+                        payment.payment_id,
+
+                    order_id:
+                        payment.order_id,
+
+                    fraud_score:
+                        fraudCase.fraud_score,
+
+                    risk_level:
+                        fraudCase.risk_level,
+
+                    verification_type:
+                        "INDEPENDENT_FRAUD_PAYMENT_RECORD_CHECK",
+
+                    payment_record_checked:
+                        true,
+
+                    payment_record_matches_case:
+                        true,
+
+                    investigation_action_recorded:
+                        true,
+
+                    investigation_only:
+                        true,
+
+                    real_money_movement:
+                        false
+
+                }
+
+            });
+
+
+            // ==========================================
+            // SUCCESS RESPONSE
+            // ==========================================
+
+            return res.json({
+
+                message:
+                    "Fraud investigation independently verified successfully.",
+
+                action:
+                    verificationUpdate.rows[0],
+
+                fraud_case: {
+
+                    id:
+                        fraudCase.id,
+
+                    payment_id:
+                        fraudCase.payment_id,
+
+                    order_id:
+                        fraudCase.order_id,
+
+                    amount:
+                        caseAmount,
+
+                    fraud_score:
+                        fraudCase.fraud_score,
+
+                    risk_level:
+                        fraudCase.risk_level,
+
+                    recommended_action:
+                        fraudCase.recommended_action,
+
+                    case_status:
+                        fraudCase.case_status
+
+                },
+
+                verification: {
+
+                    result:
+                        "VERIFIED",
+
+                    reason:
+                        "The fraud case matches the underlying payment record and the approved fraud investigation was executed in the controlled workflow.",
+
+                    payment_record_checked:
+                        true,
+
+                    payment_record_matches_case:
+                        true,
+
+                    investigation_action_recorded:
+                        true,
+
+                    independently_verified:
+                        true
+
+                },
+
+                safety: {
+
+                    real_money_movement:
+                        false,
+
+                    human_approval:
+                        true,
+
+                    independently_verified:
+                        true,
+
+                    investigation_only:
+                        true,
+
+                    fraud_proven:
+                        false
+
+                }
 
             });
 
         }
 
 
-        // ==========================================
-        // 5. GET ACTUAL MISMATCH CASE
-        // ==========================================
+        // ==================================================
+        // 6. PAYMENT FAILURE ACTION VERIFICATION
+        // ==================================================
+
+        if (action.payment_failure_case_id) {
+
+            const failureCaseResult = await pool.query(
+                `
+                SELECT
+                    id,
+                    payment_id,
+                    failure_reason,
+                    amount,
+                    risk_level,
+                    case_status,
+                    recommended_action
+                FROM payment_failure_cases
+                WHERE id = $1
+                `,
+                [action.payment_failure_case_id]
+            );
+
+
+            if (failureCaseResult.rows.length === 0) {
+
+                return res.status(404).json({
+                    message:
+                        "Related payment failure case not found."
+                });
+
+            }
+
+
+            const failureCase =
+                failureCaseResult.rows[0];
+
+
+            const paymentResult = await pool.query(
+                `
+                SELECT
+                    payment_id,
+                    order_id,
+                    amount,
+                    payment_status,
+                    failure_reason,
+                    created_at
+                FROM payments
+                WHERE payment_id = $1
+                `,
+                [failureCase.payment_id]
+            );
+
+
+            if (paymentResult.rows.length === 0) {
+
+                return res.status(409).json({
+
+                    message:
+                        "Verification failed. Payment record not found.",
+
+                    safety:
+                        "Payment failure case must not be resolved without a valid payment record."
+
+                });
+
+            }
+
+
+            const payment =
+                paymentResult.rows[0];
+
+
+            const paymentAmount =
+                Number(payment.amount);
+
+            const caseAmount =
+                Number(failureCase.amount);
+
+
+            const paymentRecordMatchesCase =
+                payment.payment_id ===
+                    failureCase.payment_id &&
+
+                paymentAmount ===
+                    caseAmount &&
+
+                payment.payment_status ===
+                    "FAILED" &&
+
+                payment.failure_reason ===
+                    failureCase.failure_reason;
+
+
+            const recoveryActionRecorded =
+                action.execution_status ===
+                "EXECUTED";
+
+
+            if (
+                !paymentRecordMatchesCase ||
+                !recoveryActionRecorded
+            ) {
+
+                return res.status(409).json({
+
+                    message:
+                        "Independent verification failed. Payment failure records do not match the expected recovery state.",
+
+                    verification: {
+
+                        result:
+                            "NOT_VERIFIED",
+
+                        payment_id:
+                            payment.payment_id,
+
+                        payment_status:
+                            payment.payment_status,
+
+                        failure_reason:
+                            payment.failure_reason,
+
+                        payment_amount:
+                            paymentAmount,
+
+                        case_amount:
+                            caseAmount,
+
+                        payment_record_matches_case:
+                            paymentRecordMatchesCase,
+
+                        recovery_action_recorded:
+                            recoveryActionRecorded
+
+                    },
+
+                    safety:
+                        "Payment failure case must not be resolved until verification succeeds."
+
+                });
+
+            }
+
+
+            const verificationUpdate =
+                await pool.query(
+                    `
+                    UPDATE approval_actions
+
+                    SET
+                        verification_status =
+                            'VERIFIED'
+
+                    WHERE id = $1
+
+                    AND approval_status =
+                        'APPROVED'
+
+                    AND execution_status =
+                        'EXECUTED'
+
+                    AND verification_status =
+                        'NOT_VERIFIED'
+
+                    RETURNING *
+                    `,
+                    [id]
+                );
+
+
+            if (verificationUpdate.rows.length === 0) {
+
+                return res.status(400).json({
+                    message:
+                        "Action could not be marked as verified."
+                });
+
+            }
+
+
+            await createAuditLog({
+
+                caseId: null,
+
+                actionId: action.id,
+
+                eventType:
+                    "ACTION_VERIFIED",
+
+                actor:
+                    "SYSTEM",
+
+                description:
+                    "PayTruth independently verified the payment failure recovery workflow against the underlying payment record.",
+
+                oldStatus:
+                    "NOT_VERIFIED",
+
+                newStatus:
+                    "VERIFIED",
+
+                metadata: {
+
+                    payment_failure_case_id:
+                        failureCase.id,
+
+                    payment_id:
+                        payment.payment_id,
+
+                    verification_type:
+                        "INDEPENDENT_PAYMENT_RECORD_CHECK",
+
+                    payment_record_checked:
+                        true,
+
+                    recovery_action_recorded:
+                        true,
+
+                    real_money_movement:
+                        false
+
+                }
+
+            });
+
+
+            return res.json({
+
+                message:
+                    "Payment failure recovery action independently verified successfully.",
+
+                action:
+                    verificationUpdate.rows[0],
+
+                verification: {
+
+                    result:
+                        "VERIFIED",
+
+                    reason:
+                        "The payment record matches the failure case and the approved recovery action was executed in the controlled workflow.",
+
+                    payment_failure_case_id:
+                        failureCase.id,
+
+                    payment_id:
+                        payment.payment_id,
+
+                    order_id:
+                        payment.order_id,
+
+                    payment_amount:
+                        paymentAmount,
+
+                    payment_status:
+                        payment.payment_status,
+
+                    failure_reason:
+                        payment.failure_reason,
+
+                    payment_record_checked:
+                        true,
+
+                    payment_record_matches_case:
+                        true,
+
+                    recovery_action_recorded:
+                        true
+
+                },
+
+                safety: {
+
+                    real_money_movement:
+                        false,
+
+                    human_approval:
+                        true,
+
+                    independently_verified:
+                        true,
+
+                    payment_status_changed:
+                        false
+
+                }
+
+            });
+
+        }
+
+
+        // ==================================================
+        // 7. SETTLEMENT / MISMATCH ACTION VERIFICATION
+        // ==================================================
 
         const caseResult = await pool.query(
             `
@@ -976,10 +2265,8 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
         if (caseResult.rows.length === 0) {
 
             return res.status(404).json({
-
                 message:
                     "Related mismatch case not found."
-
             });
 
         }
@@ -988,10 +2275,6 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
         const mismatchCase =
             caseResult.rows[0];
 
-
-        // ==========================================
-        // 6. GET ACTUAL TRANSACTION
-        // ==========================================
 
         const transactionResult = await pool.query(
             `
@@ -1010,10 +2293,8 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
         if (transactionResult.rows.length === 0) {
 
             return res.status(400).json({
-
                 message:
                     "Verification failed. Transaction record not found."
-
             });
 
         }
@@ -1024,14 +2305,8 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
 
 
         const transactionAmount =
-            Number(
-                transaction.transaction_amount
-            );
+            Number(transaction.transaction_amount);
 
-
-        // ==========================================
-        // 7. GET ACTUAL SETTLEMENT
-        // ==========================================
 
         const settlementResult = await pool.query(
             `
@@ -1053,10 +2328,8 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
         if (settlementResult.rows.length === 0) {
 
             return res.status(400).json({
-
                 message:
                     "Verification failed. Settlement record not found."
-
             });
 
         }
@@ -1067,14 +2340,8 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
 
 
         const settlementAmount =
-            Number(
-                settlement.settlement_amount
-            );
+            Number(settlement.settlement_amount);
 
-
-        // ==========================================
-        // 8. RE-CALCULATE ACTUAL DIFFERENCE
-        // ==========================================
 
         const actualDifference =
             Math.abs(
@@ -1082,10 +2349,6 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                 settlementAmount
             );
 
-
-        // ==========================================
-        // 9. GET ACTUAL FINANCIAL ADJUSTMENTS
-        // ==========================================
 
         const adjustmentResult = await pool.query(
             `
@@ -1129,10 +2392,6 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
             );
 
 
-        // ==========================================
-        // 10. CALCULATE ACTUAL ADJUSTMENT TOTAL
-        // ==========================================
-
         const totalAdjustments =
             adjustments.reduce(
                 (
@@ -1144,10 +2403,6 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                 0
             );
 
-
-        // ==========================================
-        // 11. DETECT CONTRADICTORY EVIDENCE
-        // ==========================================
 
         const adjustmentAmounts =
             adjustments.map(
@@ -1169,19 +2424,13 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
             adjustments.length > 1;
 
 
-        // ==========================================
-        // 12. CALCULATE EXPLAINED AMOUNT
-        // ==========================================
-
         let explainedDifference = 0;
 
         let unexplainedDifference =
             actualDifference;
 
 
-        if (
-            !contradictionDetected
-        ) {
+        if (!contradictionDetected) {
 
             if (
                 totalAdjustments <=
@@ -1208,41 +2457,21 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
         }
 
 
-        // ==========================================
-        // 13. INDEPENDENT VERIFICATION DECISION
-        // ==========================================
-
         let verificationPassed =
             false;
-
-        let verificationResultText;
 
         let verificationReason;
 
 
-        // ------------------------------------------
-        // CASE A: FINANCIAL RECORDS MATCH
-        // ------------------------------------------
-
-        if (
-            actualDifference === 0
-        ) {
+        if (actualDifference === 0) {
 
             verificationPassed =
                 true;
-
-            verificationResultText =
-                "VERIFIED";
 
             verificationReason =
                 "Transaction and settlement records now match.";
 
         }
-
-
-        // ------------------------------------------
-        // CASE B: FULLY EXPLAINED MISMATCH
-        // ------------------------------------------
 
         else if (
             !contradictionDetected &&
@@ -1253,38 +2482,20 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
             verificationPassed =
                 true;
 
-            verificationResultText =
-                "VERIFIED";
-
             verificationReason =
-                `The actual ₹${actualDifference} settlement difference is fully supported by recorded financial adjustment evidence.`;
+                "The actual settlement difference is fully supported by recorded financial adjustment evidence.";
 
         }
 
-
-        // ------------------------------------------
-        // CASE C: CONTRADICTION
-        // ------------------------------------------
-
-        else if (
-            contradictionDetected
-        ) {
+        else if (contradictionDetected) {
 
             verificationPassed =
                 false;
-
-            verificationResultText =
-                "NOT_VERIFIED";
 
             verificationReason =
                 "Verification failed because conflicting financial adjustment records were detected.";
 
         }
-
-
-        // ------------------------------------------
-        // CASE D: PARTIAL EVIDENCE
-        // ------------------------------------------
 
         else if (
             unexplainedDifference > 0 &&
@@ -1294,26 +2505,15 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
             verificationPassed =
                 false;
 
-            verificationResultText =
-                "NOT_VERIFIED";
-
             verificationReason =
-                `Verification failed because ₹${unexplainedDifference} of the actual financial difference remains unexplained.`;
+                "Verification failed because part of the actual financial difference remains unexplained.";
 
         }
-
-
-        // ------------------------------------------
-        // CASE E: NO EVIDENCE
-        // ------------------------------------------
 
         else {
 
             verificationPassed =
                 false;
-
-            verificationResultText =
-                "NOT_VERIFIED";
 
             verificationReason =
                 "Verification failed because no supporting financial evidence was found.";
@@ -1321,13 +2521,7 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
         }
 
 
-        // ==========================================
-        // 14. SAFETY BLOCK
-        // ==========================================
-
-        if (
-            !verificationPassed
-        ) {
+        if (!verificationPassed) {
 
             return res.status(409).json({
 
@@ -1337,7 +2531,7 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                 verification: {
 
                     result:
-                        verificationResultText,
+                        "NOT_VERIFIED",
 
                     reason:
                         verificationReason,
@@ -1369,17 +2563,12 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                 },
 
                 safety:
-
                     "Case must not be resolved until financial verification succeeds."
 
             });
 
         }
 
-
-        // ==========================================
-        // 15. MARK ACTION VERIFIED
-        // ==========================================
 
         const verificationUpdate =
             await pool.query(
@@ -1405,65 +2594,58 @@ app.post("/approval-actions/:id/verify", async (req, res) => {
                 `,
                 [id]
             );
-            
 
 
-        if (
-            verificationUpdate.rows.length === 0
-        ) {
+        if (verificationUpdate.rows.length === 0) {
 
             return res.status(400).json({
-
                 message:
                     "Action could not be marked as verified."
-
             });
 
         }
-        // ==========================================
-// AUDIT INDEPENDENT VERIFICATION
-// ==========================================
-
-await createAuditLog({
-
-    caseId: action.case_id,
-
-    actionId: action.id,
-
-    eventType: "ACTION_VERIFIED",
-
-    actor: "SYSTEM",
-
-    description:
-        "PayTruth independently verified the action against the underlying financial records.",
-
-    oldStatus:
-        "NOT_VERIFIED",
-
-    newStatus:
-        "VERIFIED",
-
-    metadata: {
-
-        verification_type:
-            "INDEPENDENT_FINANCIAL_RECORD_CHECK",
-
-        independently_verified:
-            true,
-
-        real_money_movement:
-            false
-
-    }
-
-});
 
 
-        // ==========================================
-        // 16. SUCCESS RESPONSE
-        // ==========================================
+        await createAuditLog({
 
-        res.json({
+            caseId:
+                action.case_id,
+
+            actionId:
+                action.id,
+
+            eventType:
+                "ACTION_VERIFIED",
+
+            actor:
+                "SYSTEM",
+
+            description:
+                "PayTruth independently verified the settlement action against the underlying financial records.",
+
+            oldStatus:
+                "NOT_VERIFIED",
+
+            newStatus:
+                "VERIFIED",
+
+            metadata: {
+
+                verification_type:
+                    "INDEPENDENT_FINANCIAL_RECORD_CHECK",
+
+                independently_verified:
+                    true,
+
+                real_money_movement:
+                    false
+
+            }
+
+        });
+
+
+        return res.json({
 
             message:
                 "Independent financial verification completed successfully.",
@@ -1539,7 +2721,6 @@ await createAuditLog({
             "Independent verification error:",
             error
         );
-
 
         res.status(500).json({
 
@@ -1926,24 +3107,18 @@ app.get("/cases/:id/history", async (req, res) => {
 app.get("/payment-health", async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT
-                COUNT(*) AS total_transactions,
+    SELECT
+        (SELECT COUNT(*) FROM transactions) AS total_transactions,
 
-                COUNT(*) FILTER (
-                    WHERE payment_status = 'SUCCESS'
-                ) AS successful_payments,
+        (SELECT COUNT(*) FROM transactions
+         WHERE payment_status = 'SUCCESS') AS successful_payments,
 
-                COUNT(*) FILTER (
-                    WHERE payment_status != 'SUCCESS'
-                ) AS failed_payments,
+        (SELECT COUNT(*) FROM payments
+         WHERE payment_status = 'FAILED') AS failed_payments,
 
-                COALESCE(
-                    SUM(transaction_amount),
-                    0
-                ) AS total_transaction_value
-
-            FROM transactions
-        `);
+        (SELECT COALESCE(SUM(transaction_amount),0)
+         FROM transactions) AS total_transaction_value
+`);
 
         const settlementResult = await pool.query(`
             SELECT
@@ -3101,7 +4276,1089 @@ app.get("/audit-logs", async (req, res) => {
     }
 
 });
+// ==================================================
+// PAYMENT FAILURE INTELLIGENCE — STEP 57
+// ==================================================
 
+app.get("/payment-failures", async (req, res) => {
+
+    try {
+
+        const result = await pool.query(`
+            SELECT
+                id,
+                payment_id,
+                order_id,
+                amount,
+                payment_status,
+                failure_reason,
+                created_at
+            FROM payments
+            WHERE payment_status = 'FAILED'
+            ORDER BY created_at DESC
+        `);
+
+        const failedPayments = result.rows.map(payment => {
+
+            const amount = Number(payment.amount);
+
+            let riskLevel;
+            let recommendationType;
+            let proposedAction;
+            let recommendationReason;
+
+            // ==========================================
+            // FAILURE REASON ANALYSIS
+            // ==========================================
+
+            switch (payment.failure_reason) {
+
+                case "INSUFFICIENT_FUNDS":
+
+                    riskLevel = "MEDIUM";
+
+                    recommendationType =
+                        "PAYMENT_RETRY";
+
+                    proposedAction =
+                        "Request the customer to retry the payment using an available payment method.";
+
+                    recommendationReason =
+                        "The payment failed because sufficient funds were not available.";
+
+                    break;
+
+
+                case "BANK_DECLINED":
+
+                    riskLevel = "HIGH";
+
+                    recommendationType =
+                        "ALTERNATIVE_PAYMENT_METHOD";
+
+                    proposedAction =
+                        "Request the customer to retry using another payment method.";
+
+                    recommendationReason =
+                        "The payment was declined by the bank.";
+
+                    break;
+
+
+                case "AUTHENTICATION_FAILED":
+
+                    riskLevel = "MEDIUM";
+
+                    recommendationType =
+                        "AUTHENTICATION_RETRY";
+
+                    proposedAction =
+                        "Ask the customer to retry the payment and complete authentication successfully.";
+
+                    recommendationReason =
+                        "Payment authentication was unsuccessful.";
+
+                    break;
+
+
+                default:
+
+                    riskLevel = "HIGH";
+
+                    recommendationType =
+                        "HUMAN_REVIEW";
+
+                    proposedAction =
+                        "Investigate the failed payment before attempting recovery.";
+
+                    recommendationReason =
+                        "The payment failure reason is unknown or unsupported.";
+
+                    break;
+            }
+
+
+            // ==========================================
+            // HIGH-VALUE PAYMENT ESCALATION
+            // ==========================================
+
+            if (amount >= 5000 && riskLevel !== "HIGH") {
+
+                riskLevel = "HIGH";
+
+                recommendationType =
+                    "HUMAN_REVIEW";
+
+                proposedAction =
+                    "Review the high-value failed payment before attempting recovery.";
+
+                recommendationReason =
+                    "The payment amount requires additional human review before recovery.";
+
+            }
+
+
+            return {
+
+                payment_id:
+                    payment.payment_id,
+
+                order_id:
+                    payment.order_id,
+
+                amount,
+
+                payment_status:
+                    payment.payment_status,
+
+                failure_reason:
+                    payment.failure_reason,
+
+                risk_level:
+                    riskLevel,
+
+                analysis: {
+
+                    failure_detected: true,
+
+                    root_cause:
+                        recommendationReason,
+
+                    recommendation: {
+
+                        type:
+                            recommendationType,
+
+                        proposed_action:
+                            proposedAction,
+
+                        reason:
+                            recommendationReason,
+
+                        requires_human_approval:
+                            true,
+
+                        automatic_action:
+                            false
+
+                    }
+
+                },
+
+                created_at:
+                    payment.created_at
+
+            };
+
+        });
+
+
+        res.json({
+
+            total_failed_payments:
+                failedPayments.length,
+
+            payment_failures:
+                failedPayments
+
+        });
+
+    } catch (error) {
+
+        console.error(
+            "Payment failure intelligence error:",
+            error
+        );
+
+        res.status(500).json({
+
+            message:
+                "Could not analyze failed payments",
+
+            error:
+                error.message
+
+        });
+
+    }
+
+});
+// ==================================================
+// FRAUD & ANOMALY INTELLIGENCE
+// ==================================================
+
+// ==================================================
+// FRAUD & ANOMALY INTELLIGENCE ENGINE
+// ==================================================
+
+app.get("/fraud-intelligence", async (req, res) => {
+
+    try {
+
+        // ==========================================
+        // 1. GET ALL PAYMENT RECORDS
+        // ==========================================
+
+        const paymentResult = await pool.query(`
+            SELECT
+                payment_id,
+                order_id,
+                amount,
+                payment_status,
+                failure_reason,
+                created_at
+            FROM payments
+            ORDER BY created_at DESC
+        `);
+
+
+        const fraudResults = [];
+
+
+        // ==========================================
+        // 2. ANALYZE EACH PAYMENT
+        // ==========================================
+
+        for (const payment of paymentResult.rows) {
+
+            const amount =
+                Number(payment.amount);
+
+
+            let fraudScore = 0;
+
+            const signals = [];
+
+
+            // ==========================================
+            // SIGNAL 1 — FAILED PAYMENT
+            // ==========================================
+
+            if (
+                payment.payment_status ===
+                "FAILED"
+            ) {
+
+                fraudScore += 20;
+
+                signals.push({
+
+                    type:
+                        "FAILED_PAYMENT",
+
+                    severity:
+                        "MEDIUM",
+
+                    score:
+                        20,
+
+                    explanation:
+                        "The payment failed and requires additional risk analysis."
+
+                });
+
+            }
+
+
+            // ==========================================
+            // SIGNAL 2 — ELEVATED VALUE
+            // ==========================================
+
+            if (amount >= 10000) {
+
+                fraudScore += 30;
+
+                signals.push({
+
+                    type:
+                        "HIGH_VALUE_PAYMENT",
+
+                    severity:
+                        "HIGH",
+
+                    score:
+                        30,
+
+                    explanation:
+                        `The payment amount of ₹${amount} is unusually high for the current risk model.`
+
+                });
+
+            }
+
+            else if (amount >= 5000) {
+
+                fraudScore += 15;
+
+                signals.push({
+
+                    type:
+                        "ELEVATED_VALUE_PAYMENT",
+
+                    severity:
+                        "MEDIUM",
+
+                    score:
+                        15,
+
+                    explanation:
+                        `The payment amount of ₹${amount} requires additional monitoring.`
+
+                });
+
+            }
+
+
+            // ==========================================
+            // SIGNAL 3 — RISKY FAILURE REASON
+            // ==========================================
+
+            if (
+                payment.payment_status ===
+                    "FAILED" &&
+
+                (
+                    payment.failure_reason ===
+                        "BANK_DECLINED" ||
+
+                    payment.failure_reason ===
+                        "AUTHENTICATION_FAILED"
+                )
+            ) {
+
+                fraudScore += 15;
+
+                signals.push({
+
+                    type:
+                        "PAYMENT_RISK_FAILURE",
+
+                    severity:
+                        "MEDIUM",
+
+                    score:
+                        15,
+
+                    explanation:
+                        `The payment failed because of ${payment.failure_reason}.`
+
+                });
+
+            }
+
+
+            // ==========================================
+            // SIGNAL 4 — UNKNOWN FAILURE REASON
+            // ==========================================
+
+            if (
+                payment.payment_status ===
+                    "FAILED" &&
+
+                ![
+                    "INSUFFICIENT_FUNDS",
+                    "BANK_DECLINED",
+                    "AUTHENTICATION_FAILED"
+                ].includes(
+                    payment.failure_reason
+                )
+            ) {
+
+                fraudScore += 20;
+
+                signals.push({
+
+                    type:
+                        "UNKNOWN_FAILURE_REASON",
+
+                    severity:
+                        "HIGH",
+
+                    score:
+                        20,
+
+                    explanation:
+                        "The payment contains an unknown or unsupported failure reason."
+
+                });
+
+            }
+
+
+            // ==========================================
+            // SIGNAL 5 — REPEATED PAYMENT ATTEMPTS
+            // ==========================================
+
+            if (payment.order_id) {
+
+                const repeatResult =
+                    await pool.query(
+                        `
+                        SELECT
+                            COUNT(*) AS attempt_count
+                        FROM payments
+                        WHERE order_id = $1
+                        `,
+                        [payment.order_id]
+                    );
+
+
+                const attemptCount =
+                    Number(
+                        repeatResult.rows[0]
+                            .attempt_count
+                    );
+
+
+                if (attemptCount >= 3) {
+
+                    fraudScore += 25;
+
+                    signals.push({
+
+                        type:
+                            "REPEATED_PAYMENT_ATTEMPTS",
+
+                        severity:
+                            "HIGH",
+
+                        score:
+                            25,
+
+                        explanation:
+                            `The order has ${attemptCount} payment attempts, indicating unusual payment activity.`
+
+                    });
+
+                }
+
+                else if (attemptCount === 2) {
+
+                    fraudScore += 10;
+
+                    signals.push({
+
+                        type:
+                            "MULTIPLE_PAYMENT_ATTEMPTS",
+
+                        severity:
+                            "LOW",
+
+                        score:
+                            10,
+
+                        explanation:
+                            "The order has multiple payment attempts."
+
+                    });
+
+                }
+
+            }
+
+
+            // ==========================================
+            // 3. CAP FRAUD SCORE
+            // ==========================================
+
+            fraudScore =
+                Math.min(
+                    fraudScore,
+                    100
+                );
+
+
+            // ==========================================
+            // 4. DETERMINE RISK
+            // ==========================================
+
+            let riskLevel;
+
+            if (fraudScore >= 75) {
+
+                riskLevel =
+                    "CRITICAL";
+
+            }
+
+            else if (fraudScore >= 50) {
+
+                riskLevel =
+                    "HIGH";
+
+            }
+
+            else if (fraudScore >= 25) {
+
+                riskLevel =
+                    "MEDIUM";
+
+            }
+
+            else {
+
+                riskLevel =
+                    "LOW";
+
+            }
+
+
+            // ==========================================
+            // 5. DETERMINE RECOMMENDATION
+            // ==========================================
+
+            let recommendedAction;
+
+            let requiresHumanApproval;
+
+
+            if (
+                riskLevel ===
+                "CRITICAL"
+            ) {
+
+                recommendedAction =
+                    "FRAUD_INVESTIGATION";
+
+                requiresHumanApproval =
+                    true;
+
+            }
+
+            else if (
+                riskLevel ===
+                "HIGH"
+            ) {
+
+                recommendedAction =
+                    "ENHANCED_REVIEW";
+
+                requiresHumanApproval =
+                    true;
+
+            }
+
+            else if (
+                riskLevel ===
+                "MEDIUM"
+            ) {
+
+                recommendedAction =
+                    "MONITOR_AND_REVIEW";
+
+                requiresHumanApproval =
+                    true;
+
+            }
+
+            else {
+
+                recommendedAction =
+                    "NO_ACTION";
+
+                requiresHumanApproval =
+                    false;
+
+            }
+
+
+            // ==========================================
+            // 6. AI EXPLANATION
+            // ==========================================
+
+            let aiReason;
+
+
+            if (
+                signals.length === 0
+            ) {
+
+                aiReason =
+                    "No significant fraud or anomaly signals were detected.";
+
+            }
+
+            else {
+
+                const signalNames =
+                    signals
+                        .map(
+                            signal =>
+                                signal.type
+                        )
+                        .join(", ");
+
+
+                aiReason =
+                    `${signals.length} risk signal(s) detected: ${signalNames}. PayTruth recommends ${recommendedAction}.`;
+
+            }
+
+
+            // ==========================================
+            // 7. BUILD RESULT
+            // ==========================================
+
+            fraudResults.push({
+
+                payment_id:
+                    payment.payment_id,
+
+                order_id:
+                    payment.order_id,
+
+                amount,
+
+                payment_status:
+                    payment.payment_status,
+
+                failure_reason:
+                    payment.failure_reason,
+
+                fraud_score:
+                    fraudScore,
+
+                risk_level:
+                    riskLevel,
+
+                signals,
+
+                signal_count:
+                    signals.length,
+
+                ai_reason:
+                    aiReason,
+
+                recommendation: {
+
+    type:
+        recommendedAction,
+
+    requires_human_approval:
+        recommendedAction !== "NO_ACTION",
+
+    automatic_action:
+        false
+
+},
+
+                case_status:
+                    "OPEN",
+
+                created_at:
+                    payment.created_at
+
+            });
+
+        }
+
+
+        // ==========================================
+        // 8. STORE HIGH-RISK CASES
+        // ==========================================
+
+        for (
+            const fraudCase
+            of fraudResults
+        ) {
+
+            if (
+                fraudCase.fraud_score >= 50
+            ) {
+
+                const existingResult =
+                    await pool.query(
+                        `
+                        SELECT
+                            id
+                        FROM fraud_cases
+                        WHERE payment_id = $1
+                        AND case_status = 'OPEN'
+                        `,
+                        [
+                            fraudCase.payment_id
+                        ]
+                    );
+
+
+                if (
+                    existingResult.rows.length === 0
+                ) {
+
+                    await pool.query(
+                        `
+                        INSERT INTO fraud_cases
+                        (
+                            payment_id,
+                            order_id,
+                            amount,
+                            fraud_score,
+                            risk_level,
+                            signals,
+                            ai_reason,
+                            recommended_action
+                        )
+
+                        VALUES
+                        (
+                            $1,
+                            $2,
+                            $3,
+                            $4,
+                            $5,
+                            $6,
+                            $7,
+                            $8
+                        )
+                        `,
+                        [
+                            fraudCase.payment_id,
+                            fraudCase.order_id,
+                            fraudCase.amount,
+                            fraudCase.fraud_score,
+                            fraudCase.risk_level,
+                            JSON.stringify(
+                                fraudCase.signals
+                            ),
+                            fraudCase.ai_reason,
+                            fraudCase.recommendation.type
+                        ]
+                    );
+
+                }
+
+            }
+
+        }
+
+
+        // ==========================================
+        // 9. SUMMARY
+        // ==========================================
+
+        const summary = {
+
+            total_payments:
+                fraudResults.length,
+
+            low_risk:
+                fraudResults.filter(
+                    item =>
+                        item.risk_level ===
+                        "LOW"
+                ).length,
+
+            medium_risk:
+                fraudResults.filter(
+                    item =>
+                        item.risk_level ===
+                        "MEDIUM"
+                ).length,
+
+            high_risk:
+                fraudResults.filter(
+                    item =>
+                        item.risk_level ===
+                        "HIGH"
+                ).length,
+
+            critical_risk:
+                fraudResults.filter(
+                    item =>
+                        item.risk_level ===
+                        "CRITICAL"
+                ).length,
+
+            suspicious_payments:
+                fraudResults.filter(
+                    item =>
+                        item.fraud_score >= 50
+                ).length
+
+        };
+
+
+        // ==========================================
+        // 10. RESPONSE
+        // ==========================================
+
+        res.json({
+
+            engine:
+                "PayTruth Fraud & Anomaly Intelligence",
+
+            summary,
+
+            fraud_analysis:
+                fraudResults
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "Fraud intelligence error:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            message:
+                "Could not analyze fraud and anomaly intelligence",
+
+            error:
+                error.message
+
+        });
+
+    }
+
+});
+// ==================================================
+// RESOLVE FRAUD CASE
+// ==================================================
+
+app.patch("/fraud-cases/:id/resolve", async (req, res) => {
+
+    try {
+
+        const { id } = req.params;
+
+        // ==========================================
+        // 1. GET FRAUD CASE
+        // ==========================================
+
+        const fraudCaseResult = await pool.query(
+            `
+            SELECT
+                id,
+                payment_id,
+                order_id,
+                fraud_score,
+                risk_level,
+                recommended_action,
+                case_status
+            FROM fraud_cases
+            WHERE id = $1
+            `,
+            [id]
+        );
+
+        if (fraudCaseResult.rows.length === 0) {
+
+            return res.status(404).json({
+                message: "Fraud case not found."
+            });
+
+        }
+
+        const fraudCase =
+            fraudCaseResult.rows[0];
+
+
+        // ==========================================
+        // 2. PREVENT DUPLICATE RESOLUTION
+        // ==========================================
+
+        if (
+            fraudCase.case_status === "RESOLVED"
+        ) {
+
+            return res.status(400).json({
+                message:
+                    "Fraud case is already resolved."
+            });
+
+        }
+
+
+        // ==========================================
+        // 3. CHECK VERIFIED FRAUD ACTION
+        // ==========================================
+
+        const actionResult = await pool.query(
+            `
+            SELECT
+                id,
+                action_type,
+                approval_status,
+                execution_status,
+                verification_status
+            FROM approval_actions
+            WHERE fraud_case_id = $1
+            AND action_type = 'FRAUD_INVESTIGATION'
+            AND approval_status = 'APPROVED'
+            AND execution_status = 'EXECUTED'
+            AND verification_status = 'VERIFIED'
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [id]
+        );
+
+
+        if (actionResult.rows.length === 0) {
+
+            return res.status(409).json({
+
+                message:
+                    "Fraud case cannot be resolved because no approved, executed and independently verified fraud investigation exists.",
+
+                safety:
+                    "Fraud cases must not be resolved before human approval, controlled execution and independent verification."
+            });
+
+        }
+
+
+        const verifiedAction =
+            actionResult.rows[0];
+
+
+        // ==========================================
+        // 4. RESOLVE CASE
+        // ==========================================
+
+        const updateResult = await pool.query(
+            `
+            UPDATE fraud_cases
+
+            SET case_status = 'RESOLVED'
+
+            WHERE id = $1
+
+            AND case_status <> 'RESOLVED'
+
+            RETURNING *
+            `,
+            [id]
+        );
+
+
+        if (updateResult.rows.length === 0) {
+
+            return res.status(400).json({
+                message:
+                    "Fraud case could not be resolved."
+            });
+
+        }
+
+
+        // ==========================================
+        // 5. AUDIT TRAIL
+        // ==========================================
+
+        await createAuditLog({
+
+            caseId:
+                null,
+
+            actionId:
+                verifiedAction.id,
+
+            eventType:
+                "FRAUD_CASE_RESOLVED",
+
+            actor:
+                "MERCHANT",
+
+            description:
+                "Fraud investigation was resolved after human approval, controlled execution and independent verification. Resolution does not represent a confirmed fraud determination.",
+
+            oldStatus:
+                fraudCase.case_status,
+
+            newStatus:
+                "RESOLVED",
+
+            metadata: {
+
+                fraud_case_id:
+                    fraudCase.id,
+
+                payment_id:
+                    fraudCase.payment_id,
+
+                fraud_score:
+                    fraudCase.fraud_score,
+
+                risk_level:
+                    fraudCase.risk_level,
+
+                resolution_type:
+                    "VERIFIED_FRAUD_INVESTIGATION",
+
+                human_approval:
+                    true,
+
+                independently_verified:
+                    true,
+
+                real_money_movement:
+                    false
+
+            }
+
+        });
+
+
+        // ==========================================
+        // 6. RESPONSE
+        // ==========================================
+
+        return res.json({
+
+            message:
+                "Fraud investigation resolved successfully.",
+
+            fraud_case:
+                updateResult.rows[0],
+
+            verified_action:
+                verifiedAction,
+
+            safety: {
+
+                fraud_confirmed:
+                    false,
+
+                investigation_verified:
+                    true,
+
+                human_approval:
+                    true,
+
+                real_money_movement:
+                    false
+
+            }
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "Fraud case resolution error:",
+            error
+        );
+
+        res.status(500).json({
+
+            message:
+                "Could not resolve fraud case",
+
+            error:
+                error.message
+
+        });
+
+    }
+
+});
 // ==================================================
 // START SERVER
 // ==================================================
