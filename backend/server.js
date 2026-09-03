@@ -4969,12 +4969,12 @@ app.get("/fraud-intelligence", async (req, res) => {
                 const existingResult =
                     await pool.query(
                         `
-                        SELECT
-                            id
+                        SELECT id
                         FROM fraud_cases
                         WHERE payment_id = $1
-                        AND case_status = 'OPEN'
                         `,
+                        
+                        
                         [
                             fraudCase.payment_id
                         ]
@@ -5029,6 +5029,7 @@ app.get("/fraud-intelligence", async (req, res) => {
 
             }
 
+        
         }
 
 
@@ -5116,9 +5117,7 @@ app.get("/fraud-intelligence", async (req, res) => {
     }
 
 });
-// ==================================================
-// RESOLVE FRAUD CASE
-// ==================================================
+
 
 app.patch("/fraud-cases/:id/resolve", async (req, res) => {
 
@@ -5208,6 +5207,7 @@ app.patch("/fraud-cases/:id/resolve", async (req, res) => {
 
                 safety:
                     "Fraud cases must not be resolved before human approval, controlled execution and independent verification."
+
             });
 
         }
@@ -5253,8 +5253,7 @@ app.patch("/fraud-cases/:id/resolve", async (req, res) => {
 
         await createAuditLog({
 
-            caseId:
-                null,
+            caseId: null,
 
             actionId:
                 verifiedAction.id,
@@ -5359,6 +5358,8 @@ app.patch("/fraud-cases/:id/resolve", async (req, res) => {
     }
 
 });
+
+
 // ==================================================
 // START SERVER
 // ==================================================
