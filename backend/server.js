@@ -933,7 +933,7 @@ app.post("/approval-actions/:id/execute", async (req, res) => {
         // 4A. SETTLEMENT CASE
         // ==========================================
 
-        if (action.case_id) {
+       if (action.case_id && action.action_type !== "VERIFY_REFUND") {
 
             const caseResult = await client.query(
                 `
@@ -1410,6 +1410,337 @@ app.post("/approval-actions/:id/execute", async (req, res) => {
             });
 
         }
+        // ==========================================
+// 4D. REFUND VERIFICATION
+// ==========================================
+
+if (
+    action.case_id &&
+    action.action_type === "VERIFY_REFUND"
+) {
+
+    // ==========================================
+    // GET MISMATCH CASE
+    // ==========================================
+
+    const caseResult =
+        await client.query(
+            `
+            SELECT
+                id,
+                transaction_id,
+                difference,
+                case_status
+            FROM mismatch_cases
+            WHERE id = $1
+            FOR UPDATE
+            `,
+            [action.case_id]
+        );
+
+
+    if (caseResult.rows.length === 0) {
+
+        await client.query("ROLLBACK");
+
+        return res.status(404).json({
+
+            message:
+                "Related refund mismatch case not found"
+
+        });
+
+    }
+
+
+    const refundCase =
+        caseResult.rows[0];
+
+
+    // ==========================================
+    // GET TRANSACTION
+    // ==========================================
+
+    const transactionResult =
+        await client.query(
+            `
+            SELECT
+                transaction_id,
+                transaction_amount
+            FROM transactions
+            WHERE transaction_id = $1
+            `,
+            [refundCase.transaction_id]
+        );
+
+
+    if (transactionResult.rows.length === 0) {
+
+        await client.query("ROLLBACK");
+
+        return res.status(404).json({
+
+            message:
+                "Related transaction not found"
+
+        });
+
+    }
+
+
+    const transaction =
+        transactionResult.rows[0];
+
+
+    // ==========================================
+    // GET REFUND ADJUSTMENT
+    // ==========================================
+
+    const refundResult =
+        await client.query(
+            `
+            SELECT
+                id,
+                transaction_id,
+                adjustment_type,
+                amount,
+                reason,
+                created_at
+            FROM settlement_adjustments
+            WHERE transaction_id = $1
+            AND adjustment_type = 'REFUND'
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [refundCase.transaction_id]
+        );
+
+
+    if (refundResult.rows.length === 0) {
+
+        await client.query("ROLLBACK");
+
+        return res.status(409).json({
+
+            message:
+                "Refund verification cannot proceed because no refund adjustment was found."
+
+        });
+
+    }
+
+
+    const refund =
+        refundResult.rows[0];
+
+
+    // ==========================================
+    // SAFETY CHECK
+    // ==========================================
+
+    const transactionAmount =
+        Number(transaction.transaction_amount);
+
+    const mismatchDifference =
+        Number(refundCase.difference);
+
+    const refundAmount =
+        Number(refund.amount);
+
+
+    const explainedAmount =
+        Math.min(
+            refundAmount,
+            mismatchDifference
+        );
+
+
+    const unexplainedAmount =
+        mismatchDifference -
+        explainedAmount;
+
+
+    if (unexplainedAmount > 0) {
+
+        await client.query("ROLLBACK");
+
+        return res.status(409).json({
+
+            message:
+                "Refund cannot be executed because the settlement difference is not fully explained.",
+
+            financial_analysis: {
+
+                transaction_amount:
+                    transactionAmount,
+
+                settlement_difference:
+                    mismatchDifference,
+
+                refund_amount:
+                    refundAmount,
+
+                explained_amount:
+                    explainedAmount,
+
+                unexplained_amount:
+                    unexplainedAmount
+
+            },
+
+            safety:
+                "PayTruth will not approve a refund workflow when an unexplained financial difference remains."
+
+        });
+
+    }
+
+
+    // ==========================================
+    // MOVE CASE TO INVESTIGATING
+    // ==========================================
+
+    const updatedCase =
+        await client.query(
+            `
+            UPDATE mismatch_cases
+
+            SET case_status = 'INVESTIGATING'
+
+            WHERE id = $1
+
+            RETURNING *
+            `,
+            [refundCase.id]
+        );
+
+
+    // ==========================================
+    // MARK ACTION EXECUTED
+    // ==========================================
+
+    const updatedAction =
+        await client.query(
+            `
+            UPDATE approval_actions
+
+            SET execution_status = 'EXECUTED'
+
+            WHERE id = $1
+
+            RETURNING *
+            `,
+            [id]
+        );
+
+
+    await client.query("COMMIT");
+
+
+    // ==========================================
+    // AUDIT REFUND EXECUTION
+    // ==========================================
+
+    await createAuditLog({
+
+        caseId:
+            action.case_id,
+
+        actionId:
+            action.id,
+
+        eventType:
+            "ACTION_EXECUTED",
+
+        actor:
+            "SYSTEM",
+
+        description:
+            "Approved refund verification action was executed in the controlled workflow. No refund or real money movement was performed.",
+
+        oldStatus:
+            "NOT_EXECUTED",
+
+        newStatus:
+            "EXECUTED",
+
+        metadata: {
+
+            transaction_id:
+                refundCase.transaction_id,
+
+            refund_adjustment_id:
+                refund.id,
+
+            refund_amount:
+                refundAmount,
+
+            explained_amount:
+                explainedAmount,
+
+            unexplained_amount:
+                unexplainedAmount,
+
+            action_type:
+                action.action_type,
+
+            execution_mode:
+                "SIMULATED / SANDBOX",
+
+            real_money_movement:
+                false
+
+        }
+
+    });
+
+
+    return res.json({
+
+        message:
+            "Refund verification action executed successfully",
+
+        action:
+            updatedAction.rows[0],
+
+        case:
+            updatedCase.rows[0],
+
+        refund_analysis: {
+
+            transaction_amount:
+                transactionAmount,
+
+            settlement_difference:
+                mismatchDifference,
+
+            refund_amount:
+                refundAmount,
+
+            explained_amount:
+                explainedAmount,
+
+            unexplained_amount:
+                unexplainedAmount
+
+        },
+
+        execution: {
+
+            mode:
+                "SIMULATED / SANDBOX",
+
+            refund_performed:
+                false,
+
+            real_money_movement:
+                false
+
+        }
+
+    });
+
+}
 
 
         // ==========================================
@@ -4491,6 +4822,10 @@ app.get("/payment-failures", async (req, res) => {
 // FRAUD & ANOMALY INTELLIGENCE ENGINE
 // ==================================================
 
+// ==================================================
+// FRAUD & ANOMALY INTELLIGENCE
+// ==================================================
+
 app.get("/fraud-intelligence", async (req, res) => {
 
     try {
@@ -4511,9 +4846,7 @@ app.get("/fraud-intelligence", async (req, res) => {
             ORDER BY created_at DESC
         `);
 
-
         const fraudResults = [];
-
 
         // ==========================================
         // 2. ANALYZE EACH PAYMENT
@@ -4521,44 +4854,28 @@ app.get("/fraud-intelligence", async (req, res) => {
 
         for (const payment of paymentResult.rows) {
 
-            const amount =
-                Number(payment.amount);
-
+            const amount = Number(payment.amount || 0);
 
             let fraudScore = 0;
 
             const signals = [];
 
-
             // ==========================================
             // SIGNAL 1 — FAILED PAYMENT
             // ==========================================
 
-            if (
-                payment.payment_status ===
-                "FAILED"
-            ) {
+            if (payment.payment_status === "FAILED") {
 
                 fraudScore += 20;
 
                 signals.push({
-
-                    type:
-                        "FAILED_PAYMENT",
-
-                    severity:
-                        "MEDIUM",
-
-                    score:
-                        20,
-
+                    type: "FAILED_PAYMENT",
+                    severity: "MEDIUM",
+                    score: 20,
                     explanation:
                         "The payment failed and requires additional risk analysis."
-
                 });
-
             }
-
 
             // ==========================================
             // SIGNAL 2 — ELEVATED VALUE
@@ -4569,121 +4886,72 @@ app.get("/fraud-intelligence", async (req, res) => {
                 fraudScore += 30;
 
                 signals.push({
-
-                    type:
-                        "HIGH_VALUE_PAYMENT",
-
-                    severity:
-                        "HIGH",
-
-                    score:
-                        30,
-
+                    type: "HIGH_VALUE_PAYMENT",
+                    severity: "HIGH",
+                    score: 30,
                     explanation:
                         `The payment amount of ₹${amount} is unusually high for the current risk model.`
-
                 });
 
-            }
-
-            else if (amount >= 5000) {
+            } else if (amount >= 5000) {
 
                 fraudScore += 15;
 
                 signals.push({
-
-                    type:
-                        "ELEVATED_VALUE_PAYMENT",
-
-                    severity:
-                        "MEDIUM",
-
-                    score:
-                        15,
-
+                    type: "ELEVATED_VALUE_PAYMENT",
+                    severity: "MEDIUM",
+                    score: 15,
                     explanation:
                         `The payment amount of ₹${amount} requires additional monitoring.`
-
                 });
-
             }
-
 
             // ==========================================
             // SIGNAL 3 — RISKY FAILURE REASON
             // ==========================================
 
             if (
-                payment.payment_status ===
-                    "FAILED" &&
-
+                payment.payment_status === "FAILED" &&
                 (
-                    payment.failure_reason ===
-                        "BANK_DECLINED" ||
-
-                    payment.failure_reason ===
-                        "AUTHENTICATION_FAILED"
+                    payment.failure_reason === "BANK_DECLINED" ||
+                    payment.failure_reason === "AUTHENTICATION_FAILED"
                 )
             ) {
 
                 fraudScore += 15;
 
                 signals.push({
-
-                    type:
-                        "PAYMENT_RISK_FAILURE",
-
-                    severity:
-                        "MEDIUM",
-
-                    score:
-                        15,
-
+                    type: "PAYMENT_RISK_FAILURE",
+                    severity: "MEDIUM",
+                    score: 15,
                     explanation:
                         `The payment failed because of ${payment.failure_reason}.`
-
                 });
-
             }
-
 
             // ==========================================
             // SIGNAL 4 — UNKNOWN FAILURE REASON
             // ==========================================
 
             if (
-                payment.payment_status ===
-                    "FAILED" &&
-
+                payment.payment_status === "FAILED" &&
                 ![
                     "INSUFFICIENT_FUNDS",
                     "BANK_DECLINED",
                     "AUTHENTICATION_FAILED"
-                ].includes(
-                    payment.failure_reason
-                )
+                ].includes(payment.failure_reason)
             ) {
 
                 fraudScore += 20;
 
                 signals.push({
-
-                    type:
-                        "UNKNOWN_FAILURE_REASON",
-
-                    severity:
-                        "HIGH",
-
-                    score:
-                        20,
-
+                    type: "UNKNOWN_FAILURE_REASON",
+                    severity: "HIGH",
+                    score: 20,
                     explanation:
                         "The payment contains an unknown or unsupported failure reason."
-
                 });
-
             }
-
 
             // ==========================================
             // SIGNAL 5 — REPEATED PAYMENT ATTEMPTS
@@ -4691,176 +4959,100 @@ app.get("/fraud-intelligence", async (req, res) => {
 
             if (payment.order_id) {
 
-                const repeatResult =
-                    await pool.query(
-                        `
-                        SELECT
-                            COUNT(*) AS attempt_count
-                        FROM payments
-                        WHERE order_id = $1
-                        `,
-                        [payment.order_id]
-                    );
-
+                const repeatResult = await pool.query(
+                    `
+                    SELECT COUNT(*) AS attempt_count
+                    FROM payments
+                    WHERE order_id = $1
+                    `,
+                    [payment.order_id]
+                );
 
                 const attemptCount =
-                    Number(
-                        repeatResult.rows[0]
-                            .attempt_count
-                    );
-
+                    Number(repeatResult.rows[0].attempt_count || 0);
 
                 if (attemptCount >= 3) {
 
                     fraudScore += 25;
 
                     signals.push({
-
-                        type:
-                            "REPEATED_PAYMENT_ATTEMPTS",
-
-                        severity:
-                            "HIGH",
-
-                        score:
-                            25,
-
+                        type: "REPEATED_PAYMENT_ATTEMPTS",
+                        severity: "HIGH",
+                        score: 25,
                         explanation:
                             `The order has ${attemptCount} payment attempts, indicating unusual payment activity.`
-
                     });
 
-                }
-
-                else if (attemptCount === 2) {
+                } else if (attemptCount === 2) {
 
                     fraudScore += 10;
 
                     signals.push({
-
-                        type:
-                            "MULTIPLE_PAYMENT_ATTEMPTS",
-
-                        severity:
-                            "LOW",
-
-                        score:
-                            10,
-
+                        type: "MULTIPLE_PAYMENT_ATTEMPTS",
+                        severity: "LOW",
+                        score: 10,
                         explanation:
                             "The order has multiple payment attempts."
-
                     });
-
                 }
-
             }
-
 
             // ==========================================
             // 3. CAP FRAUD SCORE
             // ==========================================
 
-            fraudScore =
-                Math.min(
-                    fraudScore,
-                    100
-                );
-
+            fraudScore = Math.min(fraudScore, 100);
 
             // ==========================================
-            // 4. DETERMINE RISK
+            // 4. DETERMINE RISK LEVEL
             // ==========================================
 
             let riskLevel;
 
             if (fraudScore >= 75) {
 
-                riskLevel =
-                    "CRITICAL";
+                riskLevel = "CRITICAL";
 
+            } else if (fraudScore >= 50) {
+
+                riskLevel = "HIGH";
+
+            } else if (fraudScore >= 25) {
+
+                riskLevel = "MEDIUM";
+
+            } else {
+
+                riskLevel = "LOW";
             }
-
-            else if (fraudScore >= 50) {
-
-                riskLevel =
-                    "HIGH";
-
-            }
-
-            else if (fraudScore >= 25) {
-
-                riskLevel =
-                    "MEDIUM";
-
-            }
-
-            else {
-
-                riskLevel =
-                    "LOW";
-
-            }
-
 
             // ==========================================
             // 5. DETERMINE RECOMMENDATION
             // ==========================================
 
             let recommendedAction;
-
             let requiresHumanApproval;
 
+            if (riskLevel === "CRITICAL") {
 
-            if (
-                riskLevel ===
-                "CRITICAL"
-            ) {
+                recommendedAction = "FRAUD_INVESTIGATION";
+                requiresHumanApproval = true;
 
-                recommendedAction =
-                    "FRAUD_INVESTIGATION";
+            } else if (riskLevel === "HIGH") {
 
-                requiresHumanApproval =
-                    true;
+                recommendedAction = "ENHANCED_REVIEW";
+                requiresHumanApproval = true;
 
+            } else if (riskLevel === "MEDIUM") {
+
+                recommendedAction = "MONITOR_AND_REVIEW";
+                requiresHumanApproval = true;
+
+            } else {
+
+                recommendedAction = "NO_ACTION";
+                requiresHumanApproval = false;
             }
-
-            else if (
-                riskLevel ===
-                "HIGH"
-            ) {
-
-                recommendedAction =
-                    "ENHANCED_REVIEW";
-
-                requiresHumanApproval =
-                    true;
-
-            }
-
-            else if (
-                riskLevel ===
-                "MEDIUM"
-            ) {
-
-                recommendedAction =
-                    "MONITOR_AND_REVIEW";
-
-                requiresHumanApproval =
-                    true;
-
-            }
-
-            else {
-
-                recommendedAction =
-                    "NO_ACTION";
-
-                requiresHumanApproval =
-                    false;
-
-            }
-
 
             // ==========================================
             // 6. AI EXPLANATION
@@ -4868,32 +5060,20 @@ app.get("/fraud-intelligence", async (req, res) => {
 
             let aiReason;
 
-
-            if (
-                signals.length === 0
-            ) {
+            if (signals.length === 0) {
 
                 aiReason =
                     "No significant fraud or anomaly signals were detected.";
 
-            }
+            } else {
 
-            else {
-
-                const signalNames =
-                    signals
-                        .map(
-                            signal =>
-                                signal.type
-                        )
-                        .join(", ");
-
+                const signalNames = signals
+                    .map(signal => signal.type)
+                    .join(", ");
 
                 aiReason =
                     `${signals.length} risk signal(s) detected: ${signalNames}. PayTruth recommends ${recommendedAction}.`;
-
             }
-
 
             // ==========================================
             // 7. BUILD RESULT
@@ -4901,11 +5081,9 @@ app.get("/fraud-intelligence", async (req, res) => {
 
             fraudResults.push({
 
-                payment_id:
-                    payment.payment_id,
+                payment_id: payment.payment_id,
 
-                order_id:
-                    payment.order_id,
+                order_id: payment.order_id,
 
                 amount,
 
@@ -4931,59 +5109,42 @@ app.get("/fraud-intelligence", async (req, res) => {
 
                 recommendation: {
 
-    type:
-        recommendedAction,
+                    type:
+                        recommendedAction,
 
-    requires_human_approval:
-        recommendedAction !== "NO_ACTION",
+                    requires_human_approval:
+                        requiresHumanApproval,
 
-    automatic_action:
-        false
-
-},
+                    automatic_action:
+                        false
+                },
 
                 case_status:
                     "OPEN",
 
                 created_at:
                     payment.created_at
-
             });
-
         }
-
 
         // ==========================================
         // 8. STORE HIGH-RISK CASES
         // ==========================================
 
-        for (
-            const fraudCase
-            of fraudResults
-        ) {
+        for (const fraudCase of fraudResults) {
 
-            if (
-                fraudCase.fraud_score >= 50
-            ) {
+            if (fraudCase.fraud_score >= 50) {
 
-                const existingResult =
-                    await pool.query(
-                        `
-                        SELECT id
-                        FROM fraud_cases
-                        WHERE payment_id = $1
-                        `,
-                        
-                        
-                        [
-                            fraudCase.payment_id
-                        ]
-                    );
+                const existingResult = await pool.query(
+                    `
+                    SELECT id
+                    FROM fraud_cases
+                    WHERE payment_id = $1
+                    `,
+                    [fraudCase.payment_id]
+                );
 
-
-                if (
-                    existingResult.rows.length === 0
-                ) {
+                if (existingResult.rows.length === 0) {
 
                     await pool.query(
                         `
@@ -4998,7 +5159,6 @@ app.get("/fraud-intelligence", async (req, res) => {
                             ai_reason,
                             recommended_action
                         )
-
                         VALUES
                         (
                             $1,
@@ -5017,21 +5177,14 @@ app.get("/fraud-intelligence", async (req, res) => {
                             fraudCase.amount,
                             fraudCase.fraud_score,
                             fraudCase.risk_level,
-                            JSON.stringify(
-                                fraudCase.signals
-                            ),
+                            JSON.stringify(fraudCase.signals),
                             fraudCase.ai_reason,
                             fraudCase.recommendation.type
                         ]
                     );
-
                 }
-
             }
-
-        
         }
-
 
         // ==========================================
         // 9. SUMMARY
@@ -5044,46 +5197,35 @@ app.get("/fraud-intelligence", async (req, res) => {
 
             low_risk:
                 fraudResults.filter(
-                    item =>
-                        item.risk_level ===
-                        "LOW"
+                    item => item.risk_level === "LOW"
                 ).length,
 
             medium_risk:
                 fraudResults.filter(
-                    item =>
-                        item.risk_level ===
-                        "MEDIUM"
+                    item => item.risk_level === "MEDIUM"
                 ).length,
 
             high_risk:
                 fraudResults.filter(
-                    item =>
-                        item.risk_level ===
-                        "HIGH"
+                    item => item.risk_level === "HIGH"
                 ).length,
 
             critical_risk:
                 fraudResults.filter(
-                    item =>
-                        item.risk_level ===
-                        "CRITICAL"
+                    item => item.risk_level === "CRITICAL"
                 ).length,
 
             suspicious_payments:
                 fraudResults.filter(
-                    item =>
-                        item.fraud_score >= 50
+                    item => item.fraud_score >= 50
                 ).length
-
         };
-
 
         // ==========================================
         // 10. RESPONSE
         // ==========================================
 
-        res.json({
+        return res.json({
 
             engine:
                 "PayTruth Fraud & Anomaly Intelligence",
@@ -5092,9 +5234,7 @@ app.get("/fraud-intelligence", async (req, res) => {
 
             fraud_analysis:
                 fraudResults
-
         });
-
 
     } catch (error) {
 
@@ -5103,21 +5243,21 @@ app.get("/fraud-intelligence", async (req, res) => {
             error
         );
 
-
-        res.status(500).json({
+        return res.status(500).json({
 
             message:
                 "Could not analyze fraud and anomaly intelligence",
 
             error:
                 error.message
-
         });
-
     }
-
 });
 
+
+// ==================================================
+// FRAUD CASE RESOLUTION
+// ==================================================
 
 app.patch("/fraud-cases/:id/resolve", async (req, res) => {
 
@@ -5150,28 +5290,22 @@ app.patch("/fraud-cases/:id/resolve", async (req, res) => {
             return res.status(404).json({
                 message: "Fraud case not found."
             });
-
         }
 
         const fraudCase =
             fraudCaseResult.rows[0];
 
-
         // ==========================================
         // 2. PREVENT DUPLICATE RESOLUTION
         // ==========================================
 
-        if (
-            fraudCase.case_status === "RESOLVED"
-        ) {
+        if (fraudCase.case_status === "RESOLVED") {
 
             return res.status(400).json({
                 message:
                     "Fraud case is already resolved."
             });
-
         }
-
 
         // ==========================================
         // 3. CHECK VERIFIED FRAUD ACTION
@@ -5187,16 +5321,15 @@ app.patch("/fraud-cases/:id/resolve", async (req, res) => {
                 verification_status
             FROM approval_actions
             WHERE fraud_case_id = $1
-            AND action_type = 'FRAUD_INVESTIGATION'
-            AND approval_status = 'APPROVED'
-            AND execution_status = 'EXECUTED'
-            AND verification_status = 'VERIFIED'
+              AND action_type = 'FRAUD_INVESTIGATION'
+              AND approval_status = 'APPROVED'
+              AND execution_status = 'EXECUTED'
+              AND verification_status = 'VERIFIED'
             ORDER BY created_at DESC
             LIMIT 1
             `,
             [id]
         );
-
 
         if (actionResult.rows.length === 0) {
 
@@ -5207,15 +5340,11 @@ app.patch("/fraud-cases/:id/resolve", async (req, res) => {
 
                 safety:
                     "Fraud cases must not be resolved before human approval, controlled execution and independent verification."
-
             });
-
         }
-
 
         const verifiedAction =
             actionResult.rows[0];
-
 
         // ==========================================
         // 4. RESOLVE CASE
@@ -5224,18 +5353,13 @@ app.patch("/fraud-cases/:id/resolve", async (req, res) => {
         const updateResult = await pool.query(
             `
             UPDATE fraud_cases
-
             SET case_status = 'RESOLVED'
-
             WHERE id = $1
-
-            AND case_status <> 'RESOLVED'
-
+              AND case_status <> 'RESOLVED'
             RETURNING *
             `,
             [id]
         );
-
 
         if (updateResult.rows.length === 0) {
 
@@ -5243,9 +5367,7 @@ app.patch("/fraud-cases/:id/resolve", async (req, res) => {
                 message:
                     "Fraud case could not be resolved."
             });
-
         }
-
 
         // ==========================================
         // 5. AUDIT TRAIL
@@ -5298,11 +5420,8 @@ app.patch("/fraud-cases/:id/resolve", async (req, res) => {
 
                 real_money_movement:
                     false
-
             }
-
         });
-
 
         // ==========================================
         // 6. RESPONSE
@@ -5332,11 +5451,8 @@ app.patch("/fraud-cases/:id/resolve", async (req, res) => {
 
                 real_money_movement:
                     false
-
             }
-
         });
-
 
     } catch (error) {
 
@@ -5345,20 +5461,790 @@ app.patch("/fraud-cases/:id/resolve", async (req, res) => {
             error
         );
 
-        res.status(500).json({
+        return res.status(500).json({
 
             message:
                 "Could not resolve fraud case",
 
             error:
                 error.message
-
         });
-
     }
-
 });
 
+
+// ==================================================
+// REFUND & ADJUSTMENT INTELLIGENCE
+// ==================================================
+
+app.get("/refund-intelligence", async (req, res) => {
+
+    try {
+
+        // ==========================================
+        // 1. GET ADJUSTMENTS WITH FINANCIAL RECORDS
+        // ==========================================
+
+        const result = await pool.query(
+            `
+            SELECT
+                sa.id AS adjustment_id,
+                sa.transaction_id,
+                sa.adjustment_type,
+                sa.amount AS adjustment_amount,
+                sa.reason AS adjustment_reason,
+                sa.created_at,
+
+                t.transaction_amount,
+
+                s.settlement_amount
+
+            FROM settlement_adjustments sa
+
+            LEFT JOIN transactions t
+                ON t.transaction_id = sa.transaction_id
+
+            LEFT JOIN settlements s
+                ON s.transaction_id = sa.transaction_id
+
+            ORDER BY sa.created_at DESC
+            `
+        );
+
+        // ==========================================
+        // 2. ANALYZE EACH ADJUSTMENT
+        // ==========================================
+
+        const analysis = result.rows.map(adjustment => {
+
+            const transactionAmount =
+                Number(adjustment.transaction_amount || 0);
+
+            const settlementAmount =
+                Number(adjustment.settlement_amount || 0);
+
+            const adjustmentAmount =
+                Number(adjustment.adjustment_amount || 0);
+
+            // ======================================
+            // FINANCIAL DIFFERENCE
+            // ======================================
+
+            const difference =
+                Math.abs(
+                    transactionAmount -
+                    settlementAmount
+                );
+
+            // ======================================
+            // EXPLAINED / UNEXPLAINED
+            // ======================================
+
+            let explainedAmount = 0;
+
+            let unexplainedAmount =
+                difference;
+
+            if (adjustment.adjustment_type === "REFUND") {
+
+                explainedAmount =
+                    Math.min(
+                        adjustmentAmount,
+                        difference
+                    );
+
+                unexplainedAmount =
+                    difference -
+                    explainedAmount;
+            }
+
+            // ======================================
+            // RISK CLASSIFICATION
+            // ======================================
+
+            let riskLevel = "LOW";
+
+            if (unexplainedAmount > 1000) {
+
+                riskLevel = "HIGH";
+
+            } else if (unexplainedAmount > 0) {
+
+                riskLevel = "MEDIUM";
+            }
+
+            // ======================================
+            // RECOMMENDATION
+            // ======================================
+
+            let recommendationType =
+                "NO_ACTION";
+
+            let proposedAction =
+                "No further action is required.";
+
+            let explanation =
+                "The adjustment has been recorded and the financial impact is explained.";
+
+            // Fully explained
+            if (
+                difference > 0 &&
+                unexplainedAmount === 0
+            ) {
+
+                recommendationType =
+                    "VERIFY_REFUND";
+
+                proposedAction =
+                    "Verify that the recorded refund is correctly reflected in the settlement.";
+
+                explanation =
+                    "The settlement difference is fully explained by the recorded refund.";
+
+                riskLevel =
+                    "LOW";
+            }
+
+            // Partially explained
+            else if (
+                explainedAmount > 0 &&
+                unexplainedAmount > 0
+            ) {
+
+                recommendationType =
+                    "INVESTIGATE_UNEXPLAINED_AMOUNT";
+
+                proposedAction =
+                    "Investigate the remaining unexplained settlement difference.";
+
+                explanation =
+                    "The refund explains part of the settlement difference, but an unexplained amount remains.";
+
+                riskLevel =
+                    unexplainedAmount > 1000
+                        ? "HIGH"
+                        : "MEDIUM";
+            }
+
+            // No explanation
+            else if (difference > 0) {
+
+                recommendationType =
+                    "INVESTIGATE_ADJUSTMENT";
+
+                proposedAction =
+                    "Investigate the settlement difference and verify the adjustment.";
+
+                explanation =
+                    "A settlement difference exists but the recorded adjustment does not explain it.";
+
+                riskLevel =
+                    difference > 1000
+                        ? "HIGH"
+                        : "MEDIUM";
+            }
+
+            return {
+
+                adjustment_id:
+                    adjustment.adjustment_id,
+
+                transaction_id:
+                    adjustment.transaction_id,
+
+                adjustment_type:
+                    adjustment.adjustment_type,
+
+                adjustment_amount:
+                    adjustmentAmount,
+
+                transaction_amount:
+                    transactionAmount,
+
+                settlement_amount:
+                    settlementAmount,
+
+                settlement_difference:
+                    difference,
+
+                explained_amount:
+                    explainedAmount,
+
+                unexplained_amount:
+                    unexplainedAmount,
+
+                reason:
+                    adjustment.adjustment_reason,
+
+                risk_level:
+                    riskLevel,
+
+                analysis: {
+
+                    adjustment_detected:
+                        true,
+
+                    financial_impact_analyzed:
+                        true,
+
+                    explanation,
+
+                    recommendation: {
+
+                        type:
+                            recommendationType,
+
+                        proposed_action:
+                            proposedAction,
+
+                        requires_human_approval:
+                            true,
+
+                        automatic_action:
+                            false
+                    }
+                },
+
+                created_at:
+                    adjustment.created_at
+            };
+        });
+
+        // ==========================================
+        // 3. SUMMARY
+        // ==========================================
+
+        const totalAdjustments =
+            analysis.length;
+
+        const totalRefunds =
+            analysis.filter(
+                item =>
+                    item.adjustment_type === "REFUND"
+            ).length;
+
+        const totalRefundAmount =
+            analysis
+                .filter(
+                    item =>
+                        item.adjustment_type === "REFUND"
+                )
+                .reduce(
+                    (sum, item) =>
+                        sum + item.adjustment_amount,
+                    0
+                );
+
+        const totalExplainedAmount =
+            analysis.reduce(
+                (sum, item) =>
+                    sum + item.explained_amount,
+                0
+            );
+
+        const totalUnexplainedAmount =
+            analysis.reduce(
+                (sum, item) =>
+                    sum + item.unexplained_amount,
+                0
+            );
+
+        // ==========================================
+        // 4. RESPONSE
+        // ==========================================
+
+        return res.json({
+
+            engine:
+                "PayTruth Refund & Adjustment Intelligence",
+
+            summary: {
+
+                total_adjustments:
+                    totalAdjustments,
+
+                total_refunds:
+                    totalRefunds,
+
+                total_refund_amount:
+                    totalRefundAmount,
+
+                total_explained_amount:
+                    totalExplainedAmount,
+
+                total_unexplained_amount:
+                    totalUnexplainedAmount
+            },
+
+            refund_analysis:
+                analysis
+        });
+
+    } catch (error) {
+
+        console.error(
+            "Refund intelligence error:",
+            error
+        );
+
+        return res.status(500).json({
+
+            message:
+                "Could not analyze refunds and adjustments",
+
+            error:
+                error.message
+        });
+    }
+});
+
+
+// ==================================================
+// PAYMENT & SETTLEMENT ANOMALY INTELLIGENCE
+// ==================================================
+
+app.get("/anomaly-intelligence", async (req, res) => {
+
+    try {
+
+        // ==========================================
+        // 1. GET PAYMENT + SETTLEMENT DATA
+        // ==========================================
+
+        const result = await pool.query(`
+            SELECT
+                t.transaction_id,
+                t.merchant_id,
+                t.transaction_amount,
+                t.payment_status,
+
+                s.settlement_amount,
+                s.settlement_status,
+
+                COALESCE(
+                    SUM(
+                        sa.amount
+                    ) FILTER (
+                        WHERE sa.adjustment_type = 'REFUND'
+                    ),
+                    0
+                ) AS refund_amount,
+
+                COUNT(sa.id) AS adjustment_count
+
+            FROM transactions t
+
+            LEFT JOIN settlements s
+                ON s.transaction_id = t.transaction_id
+
+            LEFT JOIN settlement_adjustments sa
+                ON sa.transaction_id = t.transaction_id
+
+            GROUP BY
+                t.transaction_id,
+                t.merchant_id,
+                t.transaction_amount,
+                t.payment_status,
+                s.settlement_amount,
+                s.settlement_status
+
+            ORDER BY
+                t.transaction_id
+        `);
+
+        // ==========================================
+        // 2. ANALYZE EACH TRANSACTION
+        // ==========================================
+
+        const anomalies = result.rows.map(row => {
+
+            const transactionAmount =
+                Number(row.transaction_amount || 0);
+
+            const settlementAmount =
+                Number(row.settlement_amount || 0);
+
+            const refundAmount =
+                Number(row.refund_amount || 0);
+
+            const adjustmentCount =
+                Number(row.adjustment_count || 0);
+
+            // ======================================
+            // FINANCIAL DIFFERENCE
+            // ======================================
+
+            const settlementDifference =
+                Math.abs(
+                    transactionAmount -
+                    settlementAmount
+                );
+
+            // ======================================
+            // EXPLAINED / UNEXPLAINED
+            // ======================================
+
+            const explainedAmount =
+                Math.min(
+                    refundAmount,
+                    settlementDifference
+                );
+
+            const unexplainedAmount =
+                settlementDifference -
+                explainedAmount;
+
+            // ======================================
+            // ANOMALY SCORING
+            // ======================================
+
+            let anomalyScore = 0;
+
+            const signals = [];
+
+            // High-value transaction
+            if (transactionAmount >= 10000) {
+
+                anomalyScore += 20;
+
+                signals.push({
+
+                    type:
+                        "HIGH_VALUE_TRANSACTION",
+
+                    score:
+                        20,
+
+                    explanation:
+                        "Transaction amount is at or above the high-value threshold."
+                });
+            }
+
+            // Settlement deviation
+            if (settlementDifference > 0) {
+
+                anomalyScore += 30;
+
+                signals.push({
+
+                    type:
+                        "SETTLEMENT_DEVIATION",
+
+                    score:
+                        30,
+
+                    explanation:
+                        "Settlement amount differs from the transaction amount."
+                });
+            }
+
+            // Large unexplained amount
+            if (unexplainedAmount > 1000) {
+
+                anomalyScore += 30;
+
+                signals.push({
+
+                    type:
+                        "LARGE_UNEXPLAINED_DIFFERENCE",
+
+                    score:
+                        30,
+
+                    explanation:
+                        "A significant portion of the settlement difference remains unexplained."
+                });
+            }
+
+            // Adjustment activity
+            if (adjustmentCount > 0) {
+
+                anomalyScore += 10;
+
+                signals.push({
+
+                    type:
+                        "ADJUSTMENT_ACTIVITY",
+
+                    score:
+                        10,
+
+                    explanation:
+                        "One or more financial adjustments are recorded."
+                });
+            }
+
+            // Refund explains deviation
+            if (
+                settlementDifference > 0 &&
+                unexplainedAmount === 0 &&
+                refundAmount > 0
+            ) {
+
+                anomalyScore =
+                    Math.max(
+                        0,
+                        anomalyScore - 20
+                    );
+
+                signals.push({
+
+                    type:
+                        "REFUND_EXPLAINS_DIFFERENCE",
+
+                    score:
+                        -20,
+
+                    explanation:
+                        "The recorded refund fully explains the settlement difference."
+                });
+            }
+
+            // ======================================
+            // RISK LEVEL
+            // ======================================
+
+            let riskLevel;
+
+            if (anomalyScore >= 70) {
+
+                riskLevel =
+                    "CRITICAL";
+
+            } else if (anomalyScore >= 40) {
+
+                riskLevel =
+                    "HIGH";
+
+            } else if (anomalyScore >= 20) {
+
+                riskLevel =
+                    "MEDIUM";
+
+            } else {
+
+                riskLevel =
+                    "LOW";
+            }
+
+            // ======================================
+            // RECOMMENDATION
+            // ======================================
+
+            let recommendedAction =
+                "NO_ACTION";
+
+            let requiresHumanApproval =
+                false;
+
+            if (unexplainedAmount > 1000) {
+
+                recommendedAction =
+                    "INVESTIGATE_UNEXPLAINED_ANOMALY";
+
+                requiresHumanApproval =
+                    true;
+
+            } else if (
+                settlementDifference > 0 &&
+                unexplainedAmount > 0
+            ) {
+
+                recommendedAction =
+                    "REVIEW_SETTLEMENT_ANOMALY";
+
+                requiresHumanApproval =
+                    true;
+
+            } else if (
+                settlementDifference > 0 &&
+                unexplainedAmount === 0
+            ) {
+
+                recommendedAction =
+                    "VERIFY_FINANCIAL_ADJUSTMENT";
+
+                requiresHumanApproval =
+                    true;
+            }
+
+            // ======================================
+            // AI EXPLANATION
+            // ======================================
+
+            let aiReason;
+
+            if (
+                settlementDifference === 0 &&
+                anomalyScore === 0
+            ) {
+
+                aiReason =
+                    "No payment or settlement anomaly was detected.";
+
+            } else if (
+                settlementDifference === 0 &&
+                adjustmentCount === 0 &&
+                transactionAmount >= 10000
+            ) {
+
+                aiReason =
+                    "The transaction is high value, but payment and settlement records are consistent.";
+
+            } else if (
+                unexplainedAmount === 0 &&
+                settlementDifference > 0
+            ) {
+
+                aiReason =
+                    "A settlement deviation was detected, but recorded financial adjustment evidence fully explains the difference.";
+
+            } else if (
+                unexplainedAmount > 0
+            ) {
+
+                aiReason =
+                    "A settlement deviation was detected and part of the difference remains unexplained.";
+
+            } else {
+
+                aiReason =
+                    "An unusual payment or settlement signal was detected and should be reviewed.";
+            }
+
+            // ======================================
+            // BUILD RESULT
+            // ======================================
+
+            return {
+
+                transaction_id:
+                    row.transaction_id,
+
+                merchant_id:
+                    row.merchant_id,
+
+                transaction_amount:
+                    transactionAmount,
+
+                payment_status:
+                    row.payment_status,
+
+                settlement_amount:
+                    settlementAmount,
+
+                settlement_status:
+                    row.settlement_status,
+
+                settlement_difference:
+                    settlementDifference,
+
+                refund_amount:
+                    refundAmount,
+
+                explained_amount:
+                    explainedAmount,
+
+                unexplained_amount:
+                    unexplainedAmount,
+
+                adjustment_count:
+                    adjustmentCount,
+
+                anomaly_score:
+                    anomalyScore,
+
+                risk_level:
+                    riskLevel,
+
+                signals,
+
+                ai_reason:
+                    aiReason,
+
+                recommended_action:
+                    recommendedAction,
+
+                requires_human_approval:
+                    requiresHumanApproval,
+
+                automatic_action:
+                    false
+            };
+        });
+
+        // ==========================================
+        // 3. SUMMARY
+        // ==========================================
+
+        const summary = {
+
+            total_transactions:
+                anomalies.length,
+
+            low_risk:
+                anomalies.filter(
+                    item =>
+                        item.risk_level === "LOW"
+                ).length,
+
+            medium_risk:
+                anomalies.filter(
+                    item =>
+                        item.risk_level === "MEDIUM"
+                ).length,
+
+            high_risk:
+                anomalies.filter(
+                    item =>
+                        item.risk_level === "HIGH"
+                ).length,
+
+            critical_risk:
+                anomalies.filter(
+                    item =>
+                        item.risk_level === "CRITICAL"
+                ).length,
+
+            total_unexplained_amount:
+                anomalies.reduce(
+                    (sum, item) =>
+                        sum + item.unexplained_amount,
+                    0
+                )
+        };
+
+        // ==========================================
+        // 4. RESPONSE
+        // ==========================================
+
+        return res.json({
+
+            engine:
+                "PayTruth Payment & Settlement Anomaly Intelligence",
+
+            summary,
+
+            anomalies
+        });
+
+    } catch (error) {
+
+        console.error(
+            "Anomaly intelligence error:",
+            error
+        );
+
+        return res.status(500).json({
+
+            message:
+                "Could not calculate payment and settlement anomalies",
+
+            error:
+                error.message
+        });
+    }
+});
 
 // ==================================================
 // START SERVER
