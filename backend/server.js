@@ -6245,6 +6245,347 @@ app.get("/anomaly-intelligence", async (req, res) => {
         });
     }
 });
+app.get("/merchant-financial-intelligence", async (req, res) => {
+  try {
+    // --------------------------------------------------
+    // 1. BASIC FINANCIAL SUMMARY
+    // --------------------------------------------------
+
+    const summaryResult = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM transactions) AS total_transactions,
+
+        (
+          SELECT COUNT(*)
+          FROM transactions
+          WHERE payment_status = 'SUCCESS'
+        ) AS successful_transactions,
+
+        (
+          SELECT COUNT(*)
+          FROM payments
+          WHERE payment_status = 'FAILED'
+        ) AS failed_payments,
+         (SELECT COUNT(*) FROM payments) AS total_payments,
+
+        (
+          SELECT COALESCE(SUM(transaction_amount), 0)
+          FROM transactions
+        ) AS total_transaction_value,
+
+        (
+          SELECT COALESCE(SUM(settlement_amount), 0)
+          FROM settlements
+        ) AS total_settlement_value,
+
+        (
+          SELECT COALESCE(SUM(ABS(t.transaction_amount - s.settlement_amount)), 0)
+          FROM transactions t
+          JOIN settlements s
+            ON t.transaction_id = s.transaction_id
+          WHERE t.transaction_amount <> s.settlement_amount
+        ) AS total_settlement_difference
+    `);
+
+    const summary = summaryResult.rows[0];
+
+
+    // --------------------------------------------------
+    // 2. REFUND / ADJUSTMENT IMPACT
+    // --------------------------------------------------
+
+    const adjustmentResult = await pool.query(`
+      SELECT
+        COUNT(*) AS adjustment_count,
+        COALESCE(SUM(amount), 0) AS total_adjustment_amount,
+
+        COALESCE(
+          SUM(
+            CASE
+              WHEN adjustment_type = 'REFUND'
+              THEN amount
+              ELSE 0
+            END
+          ),
+          0
+        ) AS total_refund_amount
+
+      FROM settlement_adjustments
+    `);
+
+    const adjustments = adjustmentResult.rows[0];
+
+
+    // --------------------------------------------------
+    // 3. MONEY AT RISK
+    // --------------------------------------------------
+
+    const riskResult = await pool.query(`
+      SELECT
+        COALESCE(SUM(difference), 0) AS money_at_risk
+      FROM mismatch_cases
+      WHERE case_status <> 'RESOLVED'
+    `);
+
+    const moneyAtRisk = Number(riskResult.rows[0].money_at_risk || 0);
+
+
+    // --------------------------------------------------
+    // 4. DAILY TRANSACTION TREND
+    // --------------------------------------------------
+
+    const transactionTrendResult = await pool.query(`
+      SELECT
+        DATE(t.transaction_date) AS date,
+        COUNT(*) AS transaction_count,
+        COALESCE(SUM(transaction_amount), 0) AS transaction_value
+      FROM transactions t
+      GROUP BY DATE(t.transaction_date)
+      ORDER BY DATE(t.transaction_date)
+    `);
+
+
+    // --------------------------------------------------
+    // 5. DAILY PAYMENT FAILURE TREND
+    // --------------------------------------------------
+
+    const failureTrendResult = await pool.query(`
+      SELECT
+        DATE(p.created_at) AS date,
+        COUNT(*) AS failed_payment_count,
+        COALESCE(SUM(p.amount), 0) AS failed_payment_value
+      FROM payments p
+      WHERE payment_status = 'FAILED'
+      GROUP BY DATE(p.created_at)
+      ORDER BY DATE(p.created_at)
+    `);
+
+
+    // --------------------------------------------------
+    // 6. DAILY SETTLEMENT TREND
+    // --------------------------------------------------
+
+    // --------------------------------------------------
+// 6. DAILY SETTLEMENT TREND
+// --------------------------------------------------
+
+const settlementTrendResult = await pool.query(`
+  SELECT
+    DATE(s.settlement_date) AS date,
+    COUNT(*) AS settlement_count,
+    COALESCE(SUM(s.settlement_amount), 0) AS settlement_value
+  FROM settlements s
+  GROUP BY DATE(s.settlement_date)
+  ORDER BY DATE(s.settlement_date)
+`);
+
+
+    // --------------------------------------------------
+    // 7. MERCHANT-LEVEL PERFORMANCE
+    // --------------------------------------------------
+
+    const merchantResult = await pool.query(`
+      SELECT
+        merchant_id,
+
+        COUNT(*) AS transaction_count,
+
+        COALESCE(
+          SUM(transaction_amount),
+          0
+        ) AS transaction_value,
+
+        COALESCE(
+          SUM(
+            CASE
+              WHEN payment_status = 'SUCCESS'
+              THEN 1
+              ELSE 0
+            END
+          ),
+          0
+        ) AS successful_transactions
+
+      FROM transactions
+      GROUP BY merchant_id
+      ORDER BY transaction_value DESC
+    `);
+
+
+    // --------------------------------------------------
+    // 8. CALCULATE FINANCIAL HEALTH
+    // --------------------------------------------------
+
+    const totalTransactionValue =
+      Number(summary.total_transaction_value || 0);
+
+    const totalSettlementValue =
+      Number(summary.total_settlement_value || 0);
+
+    const settlementDifference =
+      Number(summary.total_settlement_difference || 0);
+
+    const failedPayments =
+      Number(summary.failed_payments || 0);
+
+    const totalTransactions =
+      Number(summary.total_transactions || 0);
+    const totalPayments =
+      Number(summary.total_payments || 0);
+
+
+    let financialHealth = "HEALTHY";
+    let healthScore = 100;
+
+    if (moneyAtRisk > 1000) {
+      financialHealth = "CRITICAL";
+      healthScore = 40;
+    } else if (moneyAtRisk > 0) {
+      financialHealth = "AT_RISK";
+      healthScore = 70;
+    } else if (settlementDifference > 0) {
+      financialHealth = "MONITOR";
+      healthScore = 85;
+    }
+
+
+    // --------------------------------------------------
+    // 9. PAYMENT FAILURE RATE
+    // --------------------------------------------------
+     const failureRate =
+        totalPayments > 0
+         ? Number(
+            ((failedPayments / totalPayments) * 100).toFixed(2)
+                 )
+          : 0;
+    
+
+
+    // --------------------------------------------------
+    // 10. AI FINANCIAL INSIGHTS
+    // --------------------------------------------------
+
+    const insights = [];
+
+    if (moneyAtRisk > 0) {
+      insights.push({
+        type: "MONEY_AT_RISK",
+        severity: moneyAtRisk > 1000 ? "HIGH" : "MEDIUM",
+        message:
+          `₹${moneyAtRisk} remains exposed in unresolved financial cases.`,
+        recommended_action: "INVESTIGATE_UNRESOLVED_CASES",
+        requires_human_approval: true
+      });
+    }
+
+    if (settlementDifference > 0) {
+      insights.push({
+        type: "SETTLEMENT_DEVIATION",
+        severity: "MEDIUM",
+        message:
+          `Settlement records differ from transaction values by ₹${settlementDifference}.`,
+        recommended_action: "REVIEW_SETTLEMENT_DIFFERENCES",
+        requires_human_approval: true
+      });
+    }
+
+    if (failureRate >= 20) {
+      insights.push({
+        type: "HIGH_PAYMENT_FAILURE_RATE",
+        severity: "HIGH",
+        message:
+          `Payment failure rate is ${failureRate}%.`,
+        recommended_action: "INVESTIGATE_PAYMENT_FAILURES",
+        requires_human_approval: true
+      });
+    }
+
+    if (
+      moneyAtRisk === 0 &&
+      settlementDifference === 0 &&
+      failureRate < 20
+    ) {
+      insights.push({
+        type: "FINANCIAL_HEALTHY",
+        severity: "LOW",
+        message:
+          "Merchant financial records are currently consistent with no significant unresolved exposure.",
+        recommended_action: "NO_ACTION",
+        requires_human_approval: false
+      });
+    }
+
+
+    // --------------------------------------------------
+    // 11. FINAL RESPONSE
+    // --------------------------------------------------
+
+    res.json({
+      engine: "PayTruth Merchant Financial Intelligence",
+
+      financial_health: {
+        status: financialHealth,
+        score: healthScore
+      },
+
+      summary: {
+        total_transactions: totalTransactions,
+        successful_transactions:
+          Number(summary.successful_transactions || 0),
+        total_payments: totalPayments,
+        failed_payments: failedPayments,
+
+        total_transaction_value: totalTransactionValue,
+        total_settlement_value: totalSettlementValue,
+
+        settlement_difference: settlementDifference,
+
+        money_at_risk: moneyAtRisk,
+
+        adjustment_count:
+          Number(adjustments.adjustment_count || 0),
+
+        total_adjustment_amount:
+          Number(adjustments.total_adjustment_amount || 0),
+
+        total_refund_amount:
+          Number(adjustments.total_refund_amount || 0),
+
+        payment_failure_rate: failureRate
+      },
+
+      trends: {
+        transactions: transactionTrendResult.rows,
+        settlements: settlementTrendResult.rows,
+        payment_failures: failureTrendResult.rows
+      },
+
+      merchant_performance:
+        merchantResult.rows,
+
+      ai_insights:
+        insights,
+
+      safety: {
+        human_approval_required_for_financial_actions: true,
+        automatic_money_movement: false,
+        real_money_movement: false
+      }
+    });
+
+  } catch (error) {
+
+    console.error(
+      "Merchant financial intelligence error:",
+      error
+    );
+
+    res.status(500).json({
+      message:
+        "Could not generate merchant financial intelligence."
+    });
+  }
+});
 
 // ==================================================
 // START SERVER
