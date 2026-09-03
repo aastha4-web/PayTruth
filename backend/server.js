@@ -7192,6 +7192,390 @@ app.patch("/notifications/:id/read", async (req, res) => {
     });
   }
 });
+app.get("/paytruth-intelligence", async (req, res) => {
+  try {
+
+    // 1. Financial intelligence
+    const financialResult = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM transactions) AS total_transactions,
+
+        (SELECT COUNT(*)
+         FROM transactions
+         WHERE payment_status = 'SUCCESS') AS successful_transactions,
+
+        (SELECT COUNT(*) FROM payments) AS total_payments,
+
+        (SELECT COUNT(*)
+         FROM payments
+         WHERE payment_status = 'FAILED') AS failed_payments,
+
+        (SELECT COALESCE(SUM(transaction_amount), 0)
+         FROM transactions) AS total_transaction_value,
+
+        (SELECT COALESCE(SUM(settlement_amount), 0)
+         FROM settlements) AS total_settlement_value,
+
+        (SELECT COALESCE(SUM(difference), 0)
+         FROM mismatch_cases
+         WHERE case_status <> 'RESOLVED') AS money_at_risk,
+
+        (SELECT COUNT(*)
+         FROM mismatch_cases
+         WHERE case_status <> 'RESOLVED') AS unresolved_mismatches
+    `);
+
+    const financial = financialResult.rows[0];
+
+    const totalPayments =
+      Number(financial.total_payments || 0);
+
+    const failedPayments =
+      Number(financial.failed_payments || 0);
+
+    const paymentFailureRate =
+      totalPayments > 0
+        ? Number(
+            ((failedPayments / totalPayments) * 100)
+              .toFixed(2)
+          )
+        : 0;
+
+
+    // 2. Active fraud intelligence
+    const fraudResult = await pool.query(`
+      SELECT
+        COUNT(*) AS active_fraud_cases,
+
+        COUNT(*) FILTER (
+          WHERE risk_level = 'CRITICAL'
+        ) AS critical_fraud_cases,
+
+        COUNT(*) FILTER (
+          WHERE risk_level = 'HIGH'
+        ) AS high_fraud_cases
+
+      FROM fraud_cases
+      WHERE case_status <> 'RESOLVED'
+    `);
+
+    const fraud = fraudResult.rows[0];
+
+
+    // 3. Active payment failure cases
+    const failureCaseResult = await pool.query(`
+      SELECT
+        COUNT(*) AS active_payment_failure_cases,
+
+        COUNT(*) FILTER (
+          WHERE risk_level = 'HIGH'
+        ) AS high_payment_failure_cases,
+
+        COUNT(*) FILTER (
+          WHERE risk_level = 'MEDIUM'
+        ) AS medium_payment_failure_cases
+
+      FROM payment_failure_cases
+      WHERE case_status <> 'RESOLVED'
+    `);
+
+    const paymentFailures =
+      failureCaseResult.rows[0];
+
+
+    // 4. Active settlement cases
+    const settlementResult = await pool.query(`
+      SELECT
+        COUNT(*) AS active_settlement_cases,
+
+        COUNT(*) FILTER (
+          WHERE risk_level = 'HIGH'
+        ) AS high_settlement_cases,
+
+        COUNT(*) FILTER (
+          WHERE risk_level = 'MEDIUM'
+        ) AS medium_settlement_cases
+
+      FROM mismatch_cases
+      WHERE case_status <> 'RESOLVED'
+    `);
+
+    const settlements =
+      settlementResult.rows[0];
+
+
+    // 5. Active notifications
+    const notificationResult = await pool.query(`
+      SELECT
+        COUNT(*) AS unread_notifications,
+
+        COUNT(*) FILTER (
+          WHERE severity = 'CRITICAL'
+        ) AS critical_notifications,
+
+        COUNT(*) FILTER (
+          WHERE severity = 'HIGH'
+        ) AS high_notifications
+
+      FROM notifications
+      WHERE status = 'UNREAD'
+    `);
+
+    const notifications =
+      notificationResult.rows[0];
+
+
+    // 6. Action queue
+    const actionResult = await pool.query(`
+      SELECT
+        COUNT(*) AS pending_actions,
+
+        COUNT(*) FILTER (
+          WHERE approval_status = 'PENDING'
+        ) AS awaiting_approval,
+
+        COUNT(*) FILTER (
+          WHERE execution_status = 'EXECUTED'
+            AND verification_status = 'NOT_VERIFIED'
+        ) AS awaiting_verification
+
+      FROM approval_actions
+      WHERE
+        approval_status = 'PENDING'
+        OR (
+          execution_status = 'EXECUTED'
+          AND verification_status = 'NOT_VERIFIED'
+        )
+    `);
+
+    const actions =
+      actionResult.rows[0];
+
+
+    // 7. Overall health calculation
+
+    let healthScore = 100;
+
+    const moneyAtRisk =
+      Number(financial.money_at_risk || 0);
+
+    const activeFraudCases =
+      Number(fraud.active_fraud_cases || 0);
+
+    const criticalFraudCases =
+      Number(fraud.critical_fraud_cases || 0);
+
+    const unresolvedMismatches =
+      Number(financial.unresolved_mismatches || 0);
+
+    const unreadNotifications =
+      Number(notifications.unread_notifications || 0);
+
+
+    // Settlement risk
+    if (moneyAtRisk > 0) {
+      healthScore -= 20;
+    }
+
+    // Fraud risk
+    if (activeFraudCases > 0) {
+      healthScore -= 20;
+    }
+
+    if (criticalFraudCases > 0) {
+      healthScore -= 15;
+    }
+
+    // Payment failure risk
+    if (paymentFailureRate >= 50) {
+      healthScore -= 20;
+    } else if (paymentFailureRate >= 20) {
+      healthScore -= 10;
+    }
+
+    // Unresolved settlement cases
+    if (unresolvedMismatches > 0) {
+      healthScore -= 10;
+    }
+
+    // Critical unread alerts
+    if (unreadNotifications > 0) {
+      healthScore -= 5;
+    }
+
+    healthScore =
+      Math.max(0, Math.min(100, healthScore));
+
+
+    let healthStatus = "HEALTHY";
+
+    if (healthScore < 50) {
+      healthStatus = "CRITICAL";
+    } else if (healthScore < 70) {
+      healthStatus = "AT_RISK";
+    } else if (healthScore < 90) {
+      healthStatus = "MONITOR";
+    }
+
+
+    res.json({
+
+      engine:
+        "PayTruth Unified Intelligence",
+
+      financial_health: {
+        status: healthStatus,
+        score: healthScore
+      },
+
+      financial: {
+        total_transactions:
+          Number(financial.total_transactions),
+
+        successful_transactions:
+          Number(financial.successful_transactions),
+
+        total_transaction_value:
+          Number(financial.total_transaction_value),
+
+        total_settlement_value:
+          Number(financial.total_settlement_value),
+
+        money_at_risk:
+          moneyAtRisk,
+
+        unresolved_mismatches:
+          unresolvedMismatches,
+
+        payment_failure_rate:
+          paymentFailureRate
+      },
+
+      intelligence: {
+
+        settlement: {
+          active_cases:
+            Number(settlements.active_settlement_cases),
+
+          high_risk_cases:
+            Number(settlements.high_settlement_cases),
+
+          medium_risk_cases:
+            Number(settlements.medium_settlement_cases)
+        },
+
+        payment_failures: {
+          active_cases:
+            Number(paymentFailures.active_payment_failure_cases),
+
+          high_risk_cases:
+            Number(paymentFailures.high_payment_failure_cases),
+
+          medium_risk_cases:
+            Number(paymentFailures.medium_payment_failure_cases)
+        },
+
+        fraud: {
+          active_cases:
+            activeFraudCases,
+
+          critical_cases:
+            criticalFraudCases,
+
+          high_risk_cases:
+            Number(fraud.high_fraud_cases)
+        }
+
+      },
+
+      action_center: {
+
+        pending_actions:
+          Number(actions.pending_actions),
+
+        awaiting_approval:
+          Number(actions.awaiting_approval),
+
+        awaiting_verification:
+          Number(actions.awaiting_verification)
+
+      },
+
+      notifications: {
+
+        unread:
+          unreadNotifications,
+
+        critical:
+          Number(notifications.critical_notifications),
+
+        high:
+          Number(notifications.high_notifications)
+
+      },
+
+      decision_summary: {
+
+        immediate_attention_required:
+          criticalFraudCases > 0 ||
+          moneyAtRisk > 0,
+
+        financial_risk_detected:
+          moneyAtRisk > 0 ||
+          unresolvedMismatches > 0,
+
+        payment_risk_detected:
+          paymentFailureRate >= 20,
+
+        fraud_risk_detected:
+          activeFraudCases > 0,
+
+        human_approval_required:
+          true,
+
+        automatic_money_movement:
+          false
+
+      },
+
+      safety: {
+
+        human_approval_required:
+          true,
+
+        automatic_money_movement:
+          false,
+
+        real_money_movement:
+          false,
+
+        fraud_confirmation:
+          false,
+
+        sandbox_execution:
+          true,
+
+        independent_verification:
+          true
+
+      }
+
+    });
+
+  } catch (error) {
+
+    console.error(
+      "Unified PayTruth intelligence error:",
+      error
+    );
+
+    res.status(500).json({
+      message:
+        "Could not generate unified PayTruth intelligence."
+    });
+
+  }
+});
 
 // ==================================================
 // START SERVER
