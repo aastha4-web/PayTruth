@@ -6586,6 +6586,343 @@ const settlementTrendResult = await pool.query(`
     });
   }
 });
+// ==========================================================
+// STEP 41 — AUTOMATED ACTION ORCHESTRATION
+// ==========================================================
+
+app.get("/action-orchestration", async (req, res) => {
+  try {
+
+    // ------------------------------------------------------
+    // 1. SETTLEMENT / MISMATCH ACTIONS
+    // ------------------------------------------------------
+
+    const mismatchResult = await pool.query(`
+      SELECT
+        id,
+        transaction_id,
+        difference,
+        risk_level,
+        case_status
+      FROM mismatch_cases
+      WHERE case_status <> 'RESOLVED'
+      ORDER BY
+        CASE
+          WHEN risk_level = 'HIGH' THEN 3
+          WHEN risk_level = 'MEDIUM' THEN 2
+          WHEN risk_level = 'LOW' THEN 1
+          ELSE 0
+        END DESC,
+        difference DESC
+    `);
+
+
+    // ------------------------------------------------------
+    // 2. PAYMENT FAILURE ACTIONS
+    // ------------------------------------------------------
+    const paymentFailureResult = await pool.query(`
+  SELECT
+    id,
+    payment_id,
+    amount,
+    failure_reason,
+    risk_level,
+    recommended_action,
+    case_status
+  FROM payment_failure_cases
+  WHERE case_status <> 'RESOLVED'
+  ORDER BY amount DESC
+`);
+
+
+    // ------------------------------------------------------
+    // 3. FRAUD ACTIONS
+    // ------------------------------------------------------
+
+    const fraudResult = await pool.query(`
+      SELECT
+        id,
+        payment_id,
+        order_id,
+        amount,
+        fraud_score,
+        risk_level,
+        recommended_action,
+        case_status
+      FROM fraud_cases
+      WHERE case_status <> 'RESOLVED'
+      ORDER BY fraud_score DESC
+    `);
+
+
+    // ------------------------------------------------------
+    // 4. BUILD UNIFIED ACTION QUEUE
+    // ------------------------------------------------------
+
+    const actions = [];
+
+
+    // ------------------------------------------------------
+    // 4A. MISMATCH ACTIONS
+    // ------------------------------------------------------
+
+    mismatchResult.rows.forEach((item) => {
+
+      let actionType = "HUMAN_REVIEW";
+      let priority = "MEDIUM";
+
+      if (item.risk_level === "HIGH") {
+        actionType = "INVESTIGATE_MISMATCH";
+        priority = "HIGH";
+      } else if (item.risk_level === "MEDIUM") {
+        actionType = "REVIEW_SETTLEMENT_ANOMALY";
+        priority = "MEDIUM";
+      } else {
+        actionType = "REVIEW_FINANCIAL_ADJUSTMENT";
+        priority = "LOW";
+      }
+
+      actions.push({
+        source: "SETTLEMENT_RECONCILIATION",
+
+        reference_id: item.id,
+
+        transaction_id: item.transaction_id,
+
+        action_type: actionType,
+
+        priority,
+
+        amount_at_risk: Number(item.difference || 0),
+
+        reason:
+          `Settlement mismatch of ₹${item.difference} detected for transaction ${item.transaction_id}.`,
+
+        requires_human_approval: true,
+
+        automatic_action: false,
+
+        execution_mode: "SIMULATED / SANDBOX"
+      });
+
+    });
+
+
+    // ------------------------------------------------------
+    // 4B. PAYMENT FAILURE ACTIONS
+    // ------------------------------------------------------
+
+    paymentFailureResult.rows.forEach((item) => {
+    let actionType =
+  item.recommended_action || "HUMAN_REVIEW";
+
+let priority = "MEDIUM";
+
+if (item.risk_level === "HIGH") {
+  priority = "HIGH";
+} else if (item.risk_level === "CRITICAL") {
+  priority = "CRITICAL";
+}
+
+      actions.push({
+        source: "PAYMENT_FAILURE_INTELLIGENCE",
+
+        reference_id: item.id,
+
+        payment_id: item.payment_id,
+
+
+        action_type: actionType,
+
+        priority,
+
+        amount_at_risk: Number(item.amount || 0),
+
+        reason:
+          `Payment ${item.payment_id} failed because ${item.failure_reason}.`,
+
+        requires_human_approval: true,
+
+        automatic_action: false,
+
+        execution_mode: "SIMULATED / SANDBOX"
+      });
+
+    });
+
+
+    // ------------------------------------------------------
+    // 4C. FRAUD ACTIONS
+    // ------------------------------------------------------
+
+    fraudResult.rows.forEach((item) => {
+
+      actions.push({
+        source: "FRAUD_INTELLIGENCE",
+
+        reference_id: item.id,
+
+        payment_id: item.payment_id,
+
+        order_id: item.order_id,
+
+        action_type:
+          item.recommended_action || "FRAUD_INVESTIGATION",
+
+        priority:
+          item.risk_level === "CRITICAL"
+            ? "CRITICAL"
+            : item.risk_level === "HIGH"
+              ? "HIGH"
+              : "MEDIUM",
+
+        fraud_score:
+          Number(item.fraud_score || 0),
+
+        amount_at_risk:
+          Number(item.amount || 0),
+
+        reason:
+          `Fraud intelligence detected a ${item.risk_level} risk pattern for payment ${item.payment_id}.`,
+
+        requires_human_approval: true,
+
+        automatic_action: false,
+
+        execution_mode: "INVESTIGATION ONLY"
+      });
+
+    });
+
+
+    // ------------------------------------------------------
+    // 5. PRIORITY ORDER
+    // ------------------------------------------------------
+
+    const priorityWeight = {
+      CRITICAL: 4,
+      HIGH: 3,
+      MEDIUM: 2,
+      LOW: 1
+    };
+
+    actions.sort((a, b) => {
+
+      const weightA =
+        priorityWeight[a.priority] || 0;
+
+      const weightB =
+        priorityWeight[b.priority] || 0;
+
+      return weightB - weightA;
+
+    });
+
+
+    // ------------------------------------------------------
+    // 6. SYSTEM SUMMARY
+    // ------------------------------------------------------
+
+    const summary = {
+
+      total_actions:
+        actions.length,
+
+      critical_actions:
+        actions.filter(
+          action => action.priority === "CRITICAL"
+        ).length,
+
+      high_priority_actions:
+        actions.filter(
+          action => action.priority === "HIGH"
+        ).length,
+
+      medium_priority_actions:
+        actions.filter(
+          action => action.priority === "MEDIUM"
+        ).length,
+
+      low_priority_actions:
+        actions.filter(
+          action => action.priority === "LOW"
+        ).length,
+
+      human_approval_required:
+        actions.filter(
+          action => action.requires_human_approval
+        ).length,
+
+      automatic_actions:
+        actions.filter(
+          action => action.automatic_action
+        ).length
+    };
+
+
+    // ------------------------------------------------------
+    // 7. SAFETY GUARANTEE
+    // ------------------------------------------------------
+
+    res.json({
+
+      engine:
+        "PayTruth Automated Action Orchestration",
+
+      description:
+        "Unified intelligence layer that prioritizes recommended actions across payment, settlement, fraud and financial intelligence.",
+
+      summary,
+
+      action_queue:
+        actions,
+
+      workflow: {
+        detection: true,
+        analysis: true,
+        recommendation: true,
+        human_approval: true,
+        sandbox_execution: true,
+        independent_verification: true,
+        automatic_money_movement: false
+      },
+
+      safety: {
+
+        human_approval_required:
+          true,
+
+        automatic_money_movement:
+          false,
+
+        real_money_movement:
+          false,
+
+        fraud_confirmation:
+          false,
+
+        execution_mode:
+          "SIMULATED / SANDBOX"
+      }
+
+    });
+
+  } catch (error) {
+
+    console.error(
+      "Action orchestration error:",
+      error
+    );
+
+    res.status(500).json({
+
+      message:
+        "Could not generate automated action orchestration."
+
+    });
+
+  }
+});
 
 // ==================================================
 // START SERVER
