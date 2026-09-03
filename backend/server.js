@@ -14,9 +14,7 @@ const pool = new Pool({
     password: "paytruth@123",
     port: 5432,
 });
-// ==================================================
-// AUDIT TRAIL ENGINE — STEP 56
-// ==================================================
+
 
 async function createAuditLog({
     caseId = null,
@@ -72,6 +70,9 @@ async function createAuditLog({
     console.error("Audit log error:", error);
     throw error;
 }
+}
+function isValidPositiveInteger(value) {
+  return /^\d+$/.test(String(value)) && Number(value) > 0;
 }
 
 // ==================================================
@@ -266,25 +267,62 @@ app.get("/summary", async (req, res) => {
 app.patch("/cases/:transaction_id", async (req, res) => {
 
     try {
+        const transactionId =
+  String(req.params.transaction_id || "").trim();
 
-        const { transaction_id } = req.params;
+if (!/^[A-Za-z0-9_-]{1,100}$/.test(transactionId)) {
+  return res.status(400).json({
+    message: "Invalid transaction ID."
+  });
+}
+
+        
 
         const { status } = req.body;
 
 
         const allowedStatuses = [
-            "OPEN",
-            "INVESTIGATING",
-            "RESOLVED"
-        ];
+    "OPEN",
+    "INVESTIGATING",
+    "RESOLVED"
+];
 
+if (!allowedStatuses.includes(status)) {
+    return res.status(400).json({
+        message: "Invalid status"
+    });
+}
 
-        if (!allowedStatuses.includes(status)) {
+const currentCaseResult = await pool.query(
+    `
+    SELECT case_status
+    FROM mismatch_cases
+    WHERE transaction_id = $1
+    `,
+    [transactionId]
+);
 
-            return res.status(400).json({
-                message: "Invalid status"
-            });
-        }
+if (currentCaseResult.rows.length === 0) {
+    return res.status(404).json({
+        message: "Case not found"
+    });
+}
+
+const currentStatus =
+    currentCaseResult.rows[0].case_status;
+
+const allowedTransitions = {
+    OPEN: ["OPEN", "INVESTIGATING"],
+    INVESTIGATING: ["OPEN", "INVESTIGATING", "RESOLVED"],
+    RESOLVED: ["RESOLVED"]
+};
+
+if (!allowedTransitions[currentStatus]?.includes(status)) {
+    return res.status(409).json({
+        message:
+            `Invalid case status transition from ${currentStatus} to ${status}.`
+    });
+}
 
 
         const result = await pool.query(
@@ -299,7 +337,7 @@ app.patch("/cases/:transaction_id", async (req, res) => {
             `,
             [
                 status,
-                transaction_id
+                transactionId
             ]
         );
 
@@ -382,6 +420,12 @@ app.get("/cases", async (req, res) => {
 app.patch("/approval-actions/:id", async (req, res) => {
 
     try {
+        if (!isValidPositiveInteger(req.params.id)) {
+  return res.status(400).json({
+    message: "Invalid approval action ID."
+  });
+}
+
 
         const { id } = req.params;
 
@@ -858,6 +902,11 @@ app.post("/approval-actions/:id/execute", async (req, res) => {
     const client = await pool.connect();
 
     try {
+        if (!isValidPositiveInteger(req.params.id)) {
+  return res.status(400).json({
+    message: "Invalid approval action ID."
+  });
+}
 
         const { id } = req.params;
 
@@ -965,6 +1014,16 @@ app.post("/approval-actions/:id/execute", async (req, res) => {
 
             const mismatchCase =
                 caseResult.rows[0];
+
+                if (mismatchCase.case_status === "RESOLVED") {
+
+    await client.query("ROLLBACK");
+
+    return res.status(409).json({
+        message:
+            "Resolved settlement case cannot be executed again."
+    });
+}
 
 
             // Move settlement case into investigation
@@ -1455,6 +1514,16 @@ if (
 
     const refundCase =
         caseResult.rows[0];
+
+    if (refundCase.case_status === "RESOLVED") {
+
+    await client.query("ROLLBACK");
+
+    return res.status(409).json({
+        message:
+            "Resolved refund case cannot be executed again."
+    });
+}
 
 
     // ==========================================
@@ -4802,15 +4871,9 @@ app.get("/payment-failures", async (req, res) => {
         );
 
         res.status(500).json({
-
-            message:
-                "Could not analyze failed payments",
-
-            error:
-                error.message
-
-        });
-
+    message:
+        "Could not analyze failed payments"
+});
     }
 
 });
@@ -5262,6 +5325,11 @@ app.get("/fraud-intelligence", async (req, res) => {
 app.patch("/fraud-cases/:id/resolve", async (req, res) => {
 
     try {
+        if (!isValidPositiveInteger(req.params.id)) {
+  return res.status(400).json({
+    message: "Invalid fraud case ID."
+  });
+}
 
         const { id } = req.params;
 
@@ -7145,6 +7213,11 @@ app.get("/notifications", async (req, res) => {
 });
 app.patch("/notifications/:id/read", async (req, res) => {
   try {
+          if (!isValidPositiveInteger(req.params.id)) {
+  return res.status(400).json({
+    message: "Invalid notification ID."
+  });
+}
     const { id } = req.params;
 
     const result = await pool.query(`
