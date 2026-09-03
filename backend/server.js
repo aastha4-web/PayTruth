@@ -1,6 +1,7 @@
 const express = require("express");
 const { Pool } = require("pg");
 const cors = require("cors");
+const crypto = require("crypto");
 
 const app = express();
 
@@ -15,6 +16,7 @@ const pool = new Pool({
     port: 5432,
 });
 
+const WEBHOOK_SECRET = "paytruth_demo_webhook_secret";
 
 async function createAuditLog({
     caseId = null,
@@ -7645,6 +7647,598 @@ app.get("/paytruth-intelligence", async (req, res) => {
     res.status(500).json({
       message:
         "Could not generate unified PayTruth intelligence."
+    });
+
+  }
+});
+// ==================================================
+// WEBHOOK EVENT INTELLIGENCE — STEP 45
+// ==================================================
+
+// ==================================================
+// WEBHOOK EVENT INTELLIGENCE — STEP 45
+// ==================================================
+
+app.post("/webhooks/payment", async (req, res) => {
+  try {
+
+    const {
+      event_id,
+      event_type,
+      payment_id,
+      order_id
+    } = req.body;
+
+    const webhookSignature = req.headers["x-paytruth-signature"] ;
+
+    // ==========================================
+    // 1. BASIC VALIDATION
+    // ==========================================
+    if (!webhookSignature) {
+  return res.status(401).json({
+    message:
+      "Webhook signature is required."
+  });
+}
+
+const expectedSignature =
+  crypto
+    .createHmac(
+      "sha256",
+      WEBHOOK_SECRET
+    )
+    .update(
+      JSON.stringify(req.body)
+    )
+    .digest("hex");
+
+const providedSignature =
+  Buffer.from(
+    String(webhookSignature),
+    "utf8"
+  );
+
+const expectedSignatureBuffer =
+  Buffer.from(
+    expectedSignature,
+    "utf8"
+  );
+
+const signatureValid =
+  providedSignature.length ===
+    expectedSignatureBuffer.length &&
+  crypto.timingSafeEqual(
+    providedSignature,
+    expectedSignatureBuffer
+  );
+
+if (!signatureValid) {
+  return res.status(401).json({
+    message:
+      "Invalid webhook signature."
+  });
+}
+
+if (!signatureValid) {
+  return res.status(401).json({
+    message:
+      "Invalid webhook signature."
+  });
+}
+
+    if (
+      !event_id ||
+      !event_type
+    ) {
+      return res.status(400).json({
+        message:
+          "Invalid webhook payload. event_id and event_type are required."
+      });
+    }
+
+
+    if (
+      !/^[A-Za-z0-9_-]{1,100}$/.test(
+        String(event_id)
+      )
+    ) {
+      return res.status(400).json({
+        message:
+          "Invalid webhook event ID."
+      });
+    }
+
+
+    const allowedEventTypes = [
+      "payment.failed",
+      "payment.captured",
+      "payment.refunded",
+      "refund.created"
+    ];
+
+
+    if (
+      !allowedEventTypes.includes(
+        event_type
+      )
+    ) {
+      return res.status(400).json({
+        message:
+          "Unsupported webhook event type."
+      });
+    }
+
+
+    // ==========================================
+    // 2. IDEMPOTENCY CHECK
+    // ==========================================
+
+    const existingEvent =
+      await pool.query(
+        `
+        SELECT
+          id,
+          event_id,
+          event_type,
+          processed,
+          created_at
+        FROM webhook_events
+        WHERE event_id = $1
+        `,
+        [event_id]
+      );
+
+
+    if (
+      existingEvent.rows.length > 0
+    ) {
+
+      return res.status(200).json({
+
+        message:
+          "Webhook already received. Duplicate event ignored.",
+
+        duplicate:
+          true,
+
+        webhook_event:
+          existingEvent.rows[0]
+
+      });
+
+    }
+
+
+    // ==========================================
+    // 3. STORE WEBHOOK
+    // ==========================================
+
+    const webhookResult =
+      await pool.query(
+        `
+        INSERT INTO webhook_events
+        (
+          event_id,
+          event_type,
+          payment_id,
+          order_id,
+          payload,
+          signature_valid,
+          processed
+        )
+        VALUES
+        (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7
+        )
+        RETURNING *
+        `,
+        [
+          event_id,
+          event_type,
+          payment_id || null,
+          order_id || null,
+          req.body,
+          false,
+          false
+        ]
+      );
+
+
+    const webhookEvent =
+      webhookResult.rows[0];
+
+
+    // ==========================================
+    // 4. PAYMENT FAILED INTELLIGENCE
+    // ==========================================
+
+    let intelligence = null;
+
+
+    if (
+      event_type === "payment.failed"
+    ) {
+
+      if (!payment_id) {
+
+        return res.status(400).json({
+          message:
+            "payment_id is required for payment.failed events."
+        });
+
+      }
+
+
+      const paymentResult =
+        await pool.query(
+          `
+          SELECT
+            id,
+            payment_id,
+            order_id,
+            amount,
+            payment_status,
+            failure_reason
+          FROM payments
+          WHERE payment_id = $1
+          `,
+          [payment_id]
+        );
+
+
+      if (
+        paymentResult.rows.length === 0
+      ) {
+
+        return res.status(404).json({
+          message:
+            "Payment referenced by webhook was not found."
+        });
+
+      }
+
+
+      const payment =
+        paymentResult.rows[0];
+
+
+      const amount =
+        Number(payment.amount);
+
+
+      let riskLevel;
+      let recommendationType;
+      let proposedAction;
+      let recommendationReason;
+
+
+      switch (
+        payment.failure_reason
+      ) {
+
+        case "INSUFFICIENT_FUNDS":
+
+          riskLevel = "MEDIUM";
+
+          recommendationType =
+            "PAYMENT_RETRY";
+
+          proposedAction =
+            "Request the customer to retry the payment using an available payment method.";
+
+          recommendationReason =
+            "The payment failed because sufficient funds were not available.";
+
+          break;
+
+
+        case "BANK_DECLINED":
+
+          riskLevel = "HIGH";
+
+          recommendationType =
+            "ALTERNATIVE_PAYMENT_METHOD";
+
+          proposedAction =
+            "Request the customer to retry using another payment method.";
+
+          recommendationReason =
+            "The payment was declined by the bank.";
+
+          break;
+
+
+        case "AUTHENTICATION_FAILED":
+
+          riskLevel = "MEDIUM";
+
+          recommendationType =
+            "AUTHENTICATION_RETRY";
+
+          proposedAction =
+            "Ask the customer to retry the payment and complete authentication successfully.";
+
+          recommendationReason =
+            "Payment authentication was unsuccessful.";
+
+          break;
+
+
+        default:
+
+          riskLevel = "HIGH";
+
+          recommendationType =
+            "HUMAN_REVIEW";
+
+          proposedAction =
+            "Investigate the failed payment before attempting recovery.";
+
+          recommendationReason =
+            "The payment failure reason is unknown or unsupported.";
+
+          break;
+
+      }
+
+
+      // ==========================================
+      // HIGH-VALUE ESCALATION
+      // ==========================================
+
+      if (
+        amount >= 5000 &&
+        riskLevel !== "HIGH"
+      ) {
+
+        riskLevel = "HIGH";
+
+        recommendationType =
+          "HUMAN_REVIEW";
+
+        proposedAction =
+          "Review the high-value failed payment before attempting recovery.";
+
+        recommendationReason =
+          "The payment amount requires additional human review before recovery.";
+
+      }
+
+
+      // ==========================================
+      // 5. CREATE PAYMENT FAILURE CASE
+      // ==========================================
+
+      const existingCase =
+        await pool.query(
+          `
+          SELECT
+            id,
+            case_status
+          FROM payment_failure_cases
+          WHERE payment_id = $1
+          AND case_status <> 'RESOLVED'
+          `,
+          [payment_id]
+        );
+
+
+      let failureCase;
+
+
+      if (
+        existingCase.rows.length > 0
+      ) {
+
+        failureCase =
+          existingCase.rows[0];
+
+      } else {
+
+        const caseResult =
+          await pool.query(
+            `
+            INSERT INTO payment_failure_cases
+            (
+              payment_id,
+              failure_reason,
+              amount,
+              risk_level,
+              case_status,
+              recommended_action
+            )
+            VALUES
+            (
+              $1,
+              $2,
+              $3,
+              $4,
+              'OPEN',
+              $5
+            )
+            RETURNING
+              id,
+              payment_id,
+              failure_reason,
+              amount,
+              risk_level,
+              case_status,
+              recommended_action
+            `,
+            [
+              payment.payment_id,
+              payment.failure_reason,
+              amount,
+              riskLevel,
+              recommendationType
+            ]
+          );
+
+        failureCase =
+          caseResult.rows[0];
+
+      }
+
+
+      // ==========================================
+      // 6. MARK WEBHOOK PROCESSED
+      // ==========================================
+
+      await pool.query(
+        `
+        UPDATE webhook_events
+        SET processed = TRUE
+        WHERE id = $1
+        `,
+        [webhookEvent.id]
+      );
+
+      await createAuditLog({
+  eventType: "WEBHOOK_PROCESSED",
+  actor: "SYSTEM",
+  description:
+    `Webhook ${webhookEvent.event_id} processed successfully for event type ${webhookEvent.event_type}.`,
+  metadata: {
+    webhook_event_id: webhookEvent.id,
+    event_id: webhookEvent.event_id,
+    event_type: webhookEvent.event_type,
+    payment_id: webhookEvent.payment_id,
+    order_id: webhookEvent.order_id,
+    processed: true,
+    real_money_movement: false
+  }
+});
+
+
+      intelligence = {
+
+        failure_detected:
+          true,
+
+        payment_id:
+          payment.payment_id,
+
+        order_id:
+          payment.order_id,
+
+        amount,
+
+        failure_reason:
+          payment.failure_reason,
+
+        risk_level:
+          riskLevel,
+
+        recommendation: {
+
+          type:
+            recommendationType,
+
+          proposed_action:
+            proposedAction,
+
+          reason:
+            recommendationReason,
+
+          requires_human_approval:
+            true,
+
+          automatic_action:
+            false
+
+        },
+
+        case: {
+
+          id:
+            failureCase.id,
+
+          status:
+            failureCase.case_status
+
+        }
+
+      };
+
+    } else {
+
+      // Other webhook types are currently
+      // recorded for future intelligence processing.
+
+      await pool.query(
+        `
+        UPDATE webhook_events
+        SET processed = TRUE
+        WHERE id = $1
+        `,
+        [webhookEvent.id]
+      );
+
+    }
+
+
+    // ==========================================
+    // 7. RESPONSE
+    // ==========================================
+
+    res.status(201).json({
+
+      message:
+        "Webhook processed successfully.",
+
+      webhook_event: {
+
+        id:
+          webhookEvent.id,
+
+        event_id:
+          webhookEvent.event_id,
+
+        event_type:
+          webhookEvent.event_type,
+
+        processed:
+          true
+
+      },
+
+      intelligence,
+
+      safety: {
+
+        human_approval_required:
+          true,
+
+        automatic_action:
+          false,
+
+        real_money_movement:
+          false,
+
+        execution_mode:
+          "SIMULATED / SANDBOX"
+
+      }
+
+    });
+
+
+  } catch (error) {
+
+    console.error(
+      "Webhook processing error:",
+      error
+    );
+
+    res.status(500).json({
+      message:
+        "Could not process webhook event."
     });
 
   }
