@@ -6923,6 +6923,275 @@ if (item.risk_level === "HIGH") {
 
   }
 });
+app.get("/notifications", async (req, res) => {
+  try {
+    const generatedNotifications = [];
+
+    // 1. Critical / high-risk fraud alerts
+    const fraudResult = await pool.query(`
+      SELECT
+        id,
+        payment_id,
+        amount,
+        fraud_score,
+        risk_level,
+        case_status
+      FROM fraud_cases
+      WHERE case_status <> 'RESOLVED'
+        AND risk_level IN ('CRITICAL', 'HIGH')
+      ORDER BY fraud_score DESC, created_at DESC
+    `);
+
+    fraudResult.rows.forEach((item) => {
+      generatedNotifications.push({
+        notification_type: "FRAUD_ALERT",
+        severity: item.risk_level,
+        title: "High-risk payment pattern detected",
+        message:
+          `Payment ${item.payment_id} has a ${item.risk_level} fraud risk score of ${item.fraud_score}.`,
+        source: "FRAUD_INTELLIGENCE",
+        reference_id: item.id,
+        payment_id: item.payment_id
+      });
+    });
+
+    // 2. Unresolved settlement mismatch alerts
+    const mismatchResult = await pool.query(`
+      SELECT
+        id,
+        transaction_id,
+        difference,
+        risk_level,
+        case_status
+      FROM mismatch_cases
+      WHERE case_status <> 'RESOLVED'
+      ORDER BY difference DESC
+    `);
+
+    mismatchResult.rows.forEach((item) => {
+      generatedNotifications.push({
+        notification_type: "SETTLEMENT_ALERT",
+        severity: item.risk_level,
+        title: "Settlement mismatch requires attention",
+        message:
+          `Transaction ${item.transaction_id} has a settlement difference of ₹${item.difference}.`,
+        source: "SETTLEMENT_RECONCILIATION",
+        reference_id: item.id,
+        transaction_id: item.transaction_id
+      });
+    });
+
+    // 3. High-risk payment failure alerts
+    const failureResult = await pool.query(`
+      SELECT
+        id,
+        payment_id,
+        amount,
+        failure_reason,
+        risk_level,
+        case_status
+      FROM payment_failure_cases
+      WHERE case_status <> 'RESOLVED'
+        AND risk_level IN ('HIGH', 'CRITICAL')
+      ORDER BY amount DESC, created_at DESC
+    `);
+
+    failureResult.rows.forEach((item) => {
+      generatedNotifications.push({
+        notification_type: "PAYMENT_FAILURE_ALERT",
+        severity: item.risk_level,
+        title: "High-risk payment failure",
+        message:
+          `Payment ${item.payment_id} failed because ${item.failure_reason}.`,
+        source: "PAYMENT_FAILURE_INTELLIGENCE",
+        reference_id: item.id,
+        payment_id: item.payment_id
+      });
+    });
+
+    // 4. Store only new notifications
+    for (const notification of generatedNotifications) {
+      await pool.query(`
+  INSERT INTO notifications
+  (
+    notification_type,
+    severity,
+    title,
+    message,
+    source,
+    reference_id,
+    payment_id,
+    transaction_id,
+    status
+  )
+  SELECT
+    $1::VARCHAR,
+    $2::VARCHAR,
+    $3::VARCHAR,
+    $4::TEXT,
+    $5::VARCHAR,
+    $6::INTEGER,
+    $7::VARCHAR,
+    $8::VARCHAR,
+    'UNREAD'
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM notifications
+    WHERE notification_type = $1::VARCHAR
+  AND source = $5::VARCHAR
+  AND reference_id = $6::INTEGER
+  )
+`, [
+  notification.notification_type,
+  notification.severity,
+  notification.title,
+  notification.message,
+  notification.source,
+  notification.reference_id,
+  notification.payment_id || null,
+  notification.transaction_id || null
+]);
+        
+    }
+
+    // 5. Return stored notifications
+    const notificationResult = await pool.query(`
+      SELECT
+        id,
+        notification_type,
+        severity,
+        title,
+        message,
+        source,
+        reference_id,
+        payment_id,
+        transaction_id,
+        status,
+        created_at
+      FROM notifications
+      WHERE status = 'UNREAD'
+      ORDER BY
+        CASE
+          WHEN severity = 'CRITICAL' THEN 4
+          WHEN severity = 'HIGH' THEN 3
+          WHEN severity = 'MEDIUM' THEN 2
+          WHEN severity = 'LOW' THEN 1
+          ELSE 0
+        END DESC,
+        created_at DESC
+    `);
+
+    const notifications = notificationResult.rows;
+
+    res.json({
+      engine: "PayTruth Notification Intelligence",
+
+      summary: {
+        total_notifications: notifications.length,
+
+        critical_notifications:
+          notifications.filter(
+            item => item.severity === "CRITICAL"
+          ).length,
+
+        high_notifications:
+          notifications.filter(
+            item => item.severity === "HIGH"
+          ).length,
+
+        medium_notifications:
+          notifications.filter(
+            item => item.severity === "MEDIUM"
+          ).length,
+
+        low_notifications:
+          notifications.filter(
+            item => item.severity === "LOW"
+          ).length,
+
+        unread_notifications:
+          notifications.filter(
+            item => item.status === "UNREAD"
+          ).length
+      },
+
+      notifications,
+
+      delivery: {
+        mode: "INTERNAL DEMO NOTIFICATION QUEUE",
+        email_sent: false,
+        sms_sent: false,
+        push_notification_sent: false
+      },
+
+      safety: {
+        human_approval_required_for_financial_actions: true,
+        automatic_money_movement: false,
+        real_money_movement: false
+      }
+    });
+
+  } catch (error) {
+    console.error(
+      "Notification intelligence error:",
+      error
+    );
+
+    res.status(500).json({
+      message:
+        "Could not generate notifications."
+    });
+  }
+});
+app.patch("/notifications/:id/read", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(`
+      UPDATE notifications
+      SET status = 'READ'
+      WHERE id = $1
+        AND status = 'UNREAD'
+      RETURNING
+        id,
+        notification_type,
+        severity,
+        title,
+        message,
+        source,
+        reference_id,
+        payment_id,
+        transaction_id,
+        status,
+        created_at
+    `, [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        message:
+          "Unread notification not found."
+      });
+    }
+
+    res.json({
+      message:
+        "Notification marked as read.",
+      notification:
+        result.rows[0]
+    });
+
+  } catch (error) {
+    console.error(
+      "Notification read error:",
+      error
+    );
+
+    res.status(500).json({
+      message:
+        "Could not update notification."
+    });
+  }
+});
 
 // ==================================================
 // START SERVER
