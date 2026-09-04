@@ -146,12 +146,21 @@ app.get("/reconciliation", async (req, res) => {
 
                     ELSE 'HIGH'
 
-                END AS risk_level
+                END AS risk_level,
+
+                CASE
+                    WHEN t.transaction_amount = s.settlement_amount
+                        THEN 'MATCHED'
+                    ELSE COALESCE(mc.case_status, 'OPEN')
+                END AS case_status
 
             FROM transactions t
 
             JOIN settlements s
             ON t.transaction_id = s.transaction_id
+
+            LEFT JOIN mismatch_cases mc
+            ON t.transaction_id = mc.transaction_id
 
             ORDER BY difference DESC;
         `);
@@ -203,7 +212,6 @@ app.get("/reconciliation", async (req, res) => {
         });
     }
 });
-
 
 // ==================================================
 // SUMMARY
@@ -542,6 +550,272 @@ await createAuditLog({
 // ==================================================
 // GET APPROVAL ACTIONS
 // ==================================================
+app.post("/approval-actions", async (req, res) => {
+
+    try {
+
+        const {
+            case_id,
+            payment_failure_case_id,
+            fraud_case_id,
+            action_type,
+            ai_reason,
+            proposed_action
+        } = req.body;
+
+        // -----------------------------------------
+        // VALIDATION
+        // -----------------------------------------
+
+        if (!action_type || !proposed_action) {
+            return res.status(400).json({
+                message:
+                    "action_type and proposed_action are required."
+            });
+        }
+
+        // Exactly one case reference is required
+        const references = [
+            case_id,
+            payment_failure_case_id,
+            fraud_case_id
+        ].filter(
+            value =>
+                value !== undefined &&
+                value !== null &&
+                value !== ""
+        );
+
+        if (references.length !== 1) {
+            return res.status(400).json({
+                message:
+                    "Exactly one case reference is required."
+            });
+        }
+
+        // Validate reference ID
+        const referenceId = references[0];
+
+        if (!isValidPositiveInteger(referenceId)) {
+            return res.status(400).json({
+                message:
+                    "Invalid approval case reference."
+            });
+        }
+
+        // -----------------------------------------
+        // VERIFY REFERENCED CASE EXISTS
+        // -----------------------------------------
+
+        if (case_id !== undefined &&
+            case_id !== null) {
+
+            const result = await pool.query(
+                `
+                SELECT id
+                FROM mismatch_cases
+                WHERE id = $1
+                `,
+                [case_id]
+            );
+
+            if (result.rows.length === 0) {
+                return res.status(404).json({
+                    message:
+                        "Settlement mismatch case not found."
+                });
+            }
+        }
+
+        if (payment_failure_case_id !== undefined &&
+            payment_failure_case_id !== null) {
+
+            const result = await pool.query(
+                `
+                SELECT id
+                FROM payment_failure_cases
+                WHERE id = $1
+                `,
+                [payment_failure_case_id]
+            );
+
+            if (result.rows.length === 0) {
+                return res.status(404).json({
+                    message:
+                        "Payment failure case not found."
+                });
+            }
+        }
+
+        if (fraud_case_id !== undefined &&
+            fraud_case_id !== null) {
+
+            const result = await pool.query(
+                `
+                SELECT id
+                FROM fraud_cases
+                WHERE id = $1
+                `,
+                [fraud_case_id]
+            );
+
+            if (result.rows.length === 0) {
+                return res.status(404).json({
+                    message:
+                        "Fraud case not found."
+                });
+            }
+        }
+
+        // -----------------------------------------
+        // PREVENT DUPLICATE PENDING APPROVAL
+        // -----------------------------------------
+
+        let duplicateQuery;
+        let duplicateParams;
+
+        if (case_id !== undefined &&
+            case_id !== null) {
+
+            duplicateQuery = `
+                SELECT id
+                FROM approval_actions
+                WHERE case_id = $1
+                  AND approval_status = 'PENDING'
+            `;
+
+            duplicateParams = [case_id];
+
+        } else if (
+            payment_failure_case_id !== undefined &&
+            payment_failure_case_id !== null
+        ) {
+
+            duplicateQuery = `
+                SELECT id
+                FROM approval_actions
+                WHERE payment_failure_case_id = $1
+                  AND approval_status = 'PENDING'
+            `;
+
+            duplicateParams = [
+                payment_failure_case_id
+            ];
+
+        } else {
+
+            duplicateQuery = `
+                SELECT id
+                FROM approval_actions
+                WHERE fraud_case_id = $1
+                  AND approval_status = 'PENDING'
+            `;
+
+            duplicateParams = [fraud_case_id];
+        }
+
+        const duplicateResult =
+            await pool.query(
+                duplicateQuery,
+                duplicateParams
+            );
+
+        if (duplicateResult.rows.length > 0) {
+            return res.status(409).json({
+                message:
+                    "A pending approval already exists for this case.",
+                approval_action_id:
+                    duplicateResult.rows[0].id
+            });
+        }
+
+        // -----------------------------------------
+        // CREATE APPROVAL ACTION
+        // -----------------------------------------
+
+        const result = await pool.query(
+            `
+            INSERT INTO approval_actions
+            (
+                case_id,
+                payment_failure_case_id,
+                fraud_case_id,
+                action_type,
+                ai_reason,
+                proposed_action,
+                approval_status,
+                execution_status,
+                verification_status
+            )
+            VALUES
+            (
+                $1,
+                $2,
+                $3,
+                $4,
+                $5,
+                $6,
+                'PENDING',
+                'NOT_EXECUTED',
+                'NOT_VERIFIED'
+            )
+            RETURNING *
+            `,
+            [
+                case_id ?? null,
+                payment_failure_case_id ?? null,
+                fraud_case_id ?? null,
+                action_type,
+                ai_reason || null,
+                proposed_action
+            ]
+        );
+
+        const action = result.rows[0];
+
+        // -----------------------------------------
+        // AUDIT TRAIL
+        // -----------------------------------------
+
+        await createAuditLog({
+            caseId: case_id ?? null,
+            actionId: action.id,
+            eventType: "ACTION_REQUESTED",
+            actor: "MERCHANT",
+            description:
+                `Approval requested for ${action_type}.`,
+            oldStatus: null,
+            newStatus: "PENDING",
+            metadata: {
+                action_type,
+                case_id: case_id ?? null,
+                payment_failure_case_id:
+                    payment_failure_case_id ?? null,
+                fraud_case_id:
+                    fraud_case_id ?? null,
+                real_money_movement: false
+            }
+        });
+
+        res.status(201).json({
+            message:
+                "Approval action created successfully.",
+            action
+        });
+
+    } catch (error) {
+
+        console.error(
+            "Approval action creation error:",
+            error
+        );
+
+        res.status(500).json({
+            message:
+                "Could not create approval action."
+        });
+    }
+});
 
 app.get("/approval-actions", async (req, res) => {
 
@@ -4681,6 +4955,219 @@ app.get("/audit-logs", async (req, res) => {
 // ==================================================
 // PAYMENT FAILURE INTELLIGENCE — STEP 57
 // ==================================================
+app.patch("/payment-failure-cases/:id/resolve", async (req, res) => {
+    try {
+        const caseId = Number(req.params.id);
+
+        // Validate case ID
+        if (!Number.isInteger(caseId) || caseId <= 0) {
+            return res.status(400).json({
+                message: "Invalid payment failure case ID"
+            });
+        }
+
+        // ------------------------------------------
+        // 1. Find payment failure case
+        // ------------------------------------------
+
+        const caseResult = await pool.query(
+            `
+            SELECT
+                id,
+                payment_id,
+                failure_reason,
+                amount,
+                risk_level,
+                case_status,
+                recommended_action,
+                created_at
+            FROM payment_failure_cases
+            WHERE id = $1
+            `,
+            [caseId]
+        );
+
+        if (caseResult.rows.length === 0) {
+            return res.status(404).json({
+                message: "Payment failure case not found"
+            });
+        }
+
+        const paymentCase = caseResult.rows[0];
+
+        // ------------------------------------------
+        // 2. Prevent resolving an already resolved case
+        // ------------------------------------------
+
+        if (paymentCase.case_status === "RESOLVED") {
+            return res.status(409).json({
+                message: "Payment failure case is already resolved"
+            });
+        }
+
+        // ------------------------------------------
+        // 3. Find the latest approval for this case
+        // ------------------------------------------
+
+        const approvalResult = await pool.query(
+            `
+            SELECT
+                id,
+                action_type,
+                approval_status,
+                execution_status,
+                verification_status
+            FROM approval_actions
+            WHERE payment_failure_case_id = $1
+            ORDER BY id DESC
+            LIMIT 1
+            `,
+            [caseId]
+        );
+
+        if (approvalResult.rows.length === 0) {
+            return res.status(409).json({
+                message:
+                    "Human approval is required before resolving this case"
+            });
+        }
+
+        const approval = approvalResult.rows[0];
+
+        // ------------------------------------------
+        // 4. Require APPROVED
+        // ------------------------------------------
+
+        if (approval.approval_status !== "APPROVED") {
+            return res.status(409).json({
+                message:
+                    "Payment failure case has not been approved"
+            });
+        }
+
+        // ------------------------------------------
+        // 5. Require EXECUTED
+        // ------------------------------------------
+
+        if (approval.execution_status !== "EXECUTED") {
+            return res.status(409).json({
+                message:
+                    "Payment failure action has not been executed"
+            });
+        }
+
+        // ------------------------------------------
+        // 6. Require independent verification
+        // ------------------------------------------
+
+        if (approval.verification_status !== "VERIFIED") {
+            return res.status(409).json({
+                message:
+                    "Payment failure action has not been independently verified"
+            });
+        }
+
+        // ------------------------------------------
+        // 7. Resolve the case
+        // ------------------------------------------
+
+        const updateResult = await pool.query(
+            `
+            UPDATE payment_failure_cases
+            SET case_status = 'RESOLVED'
+            WHERE id = $1
+            RETURNING
+                id,
+                payment_id,
+                failure_reason,
+                amount,
+                risk_level,
+                case_status,
+                recommended_action,
+                created_at
+            `,
+            [caseId]
+        );
+
+        const resolvedCase = updateResult.rows[0];
+
+        // ------------------------------------------
+        // 8. Add audit event
+        // ------------------------------------------
+
+        await pool.query(
+            `
+            INSERT INTO audit_logs
+            (
+                case_id,
+                action_id,
+                event_type,
+                actor,
+                description,
+                old_status,
+                new_status,
+                metadata
+            )
+            VALUES
+            (
+                $1,
+                $2,
+                $3,
+                $4,
+                $5,
+                $6,
+                $7,
+                $8
+            )
+            `,
+            [
+                caseId,
+                approval.id,
+                "PAYMENT_FAILURE_CASE_RESOLVED",
+                "SYSTEM",
+                `Payment failure case ${caseId} resolved after human approval, controlled execution and independent verification.`,
+                paymentCase.case_status,
+                "RESOLVED",
+                JSON.stringify({
+                    payment_id: paymentCase.payment_id,
+                    approval_action_id: approval.id,
+                    execution_status: approval.execution_status,
+                    verification_status: approval.verification_status,
+                    sandbox_only: true
+                })
+            ]
+        );
+
+        // ------------------------------------------
+        // 9. Return resolved case
+        // ------------------------------------------
+
+        res.json({
+            message:
+                "Payment failure case resolved successfully",
+            case: resolvedCase,
+            approval: {
+                id: approval.id,
+                approval_status: approval.approval_status,
+                execution_status: approval.execution_status,
+                verification_status:
+                    approval.verification_status
+            }
+        });
+
+    } catch (error) {
+
+        console.error(
+            "Payment failure case resolution error:",
+            error
+        );
+
+        res.status(500).json({
+            message:
+                "Could not resolve payment failure case"
+        });
+    }
+});
 
 app.get("/payment-failures", async (req, res) => {
 
